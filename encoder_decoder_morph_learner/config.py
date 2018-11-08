@@ -4,7 +4,7 @@ import shutil
 import numpy as np
 import configparser
 
-from .kwargs import UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS, UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS
+from .kwargs import ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS
 
 
 
@@ -36,7 +36,7 @@ class Config(object):
             shutil.copy2(path, self.outdir + '/config.ini')
 
         # Process config settings
-        self.model_settings = self.build_unsupervised_word_classifier_settings(settings)
+        self.model_settings = self.build_encoder_decoder_morph_learner_settings(settings)
         self.model_settings['n_iter'] = settings.getint('n_iter', 1000)
         gpu_frac = settings.get('gpu_frac', None)
         if gpu_frac in [None, 'None']:
@@ -49,28 +49,15 @@ class Config(object):
         self.model_settings['gpu_frac'] = gpu_frac
         self.model_settings['use_gpu_if_available'] = settings.getboolean('use_gpu_if_available', True)
 
-
     def __getitem__(self, item):
             return self.model_settings[item]
 
-    def build_unsupervised_word_classifier_settings(self, settings):
+    def build_encoder_decoder_morph_learner_settings(self, settings):
         out = {}
 
-        # Core fields
-        out['network_type'] = settings.get('network_type', 'bayes')
-
-        # Parent class initialization keyword arguments
-        out['k'] = settings.getint('k', 128)
+        # Initialization keyword arguments
         out['outdir'] = self.outdir
-        for kwarg in UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS:
-            out[kwarg.key] = kwarg.kwarg_from_config(settings)
-
-        # MLE initialization keyword arguments
-        for kwarg in UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS:
-            out[kwarg.key] = kwarg.kwarg_from_config(settings)
-
-        # Bayes initialization keyword arguments
-        for kwarg in UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS:
+        for kwarg in ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS:
             out[kwarg.key] = kwarg.kwarg_from_config(settings)
 
         return out

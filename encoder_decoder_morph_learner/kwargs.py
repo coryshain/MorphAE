@@ -136,66 +136,12 @@ class Kwarg(object):
 
 
 
-UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
+ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     Kwarg(
         'outdir',
         './dtsr_model/',
         str,
         "Path to output directory, where logs and model parameters are saved."
-    ),
-    Kwarg(
-        'task',
-        'autoencoder',
-        str,
-        "Task to perform. One of ``['utterance_classifier', 'autoencoder', 'streaming_autoencoder']``."
-    ),
-    Kwarg(
-        'n_correspondence',
-        None,
-        [int, None],
-        "Number of discovered segments to use to compute correspondence autoencoder auxiliary loss. If ``0`` or ``None``, do not use correpondence autoencoder."
-    ),
-    Kwarg(
-        'resample_correspondence',
-        25,
-        int,
-        "Number of timesteps to which correspondence autoencoder targets should be resampled. Ignored if **n_correspondence** is ``0`` or ``None``."
-    ),
-    Kwarg(
-        'correspondence_start_iter',
-        1,
-        int,
-        "Iteration number at which to start minimizing correpondence autoencoder auxiliary loss. Ignored if **n_correspondence** is ``0`` or ``None``."
-    ),
-    Kwarg(
-        'correspondence_loss_weight',
-        1.,
-        float,
-        "Coefficient by which to scale correspondence autoencoder auxiliary loss. Ignored if **n_correspondence** is ``0`` or ``None``."
-    ),
-    Kwarg(
-        'binary_classifier',
-        False,
-        bool,
-        "Implement the classifier as a binary code in which categories can share bits. If ``False``, implements the classifier using independent categories."
-    ),
-    Kwarg(
-        'emb_dim',
-        None,
-        [int, None],
-        "Append **emb_dim** ELU-activated pass-through channels to the classifier output for capturing category-internal variation. If ``None`` or ``0``, the encoding consists exclusively of the classifier output."
-    ),
-    Kwarg(
-        'speaker_emb_dim',
-        None,
-        [int, None],
-        "Append a **speaker_emb_dim** dimensional embedding of the speaker ID to each acoustic frame and to the utterance embedding. If ``None`` or ``0``, no speaker embedding used."
-    ),
-    Kwarg(
-        'utt_len_emb_dim',
-        None,
-        [int, None],
-        "Append **utt_len_emb_dim** embedding of utterance length (number of non-padding characters) to the classifier output for capturing temporal dilation. If ``None`` or ``0``, the encoding consists exclusively of the classifier output."
     ),
     Kwarg(
         'encoder_type',
@@ -213,7 +159,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         'n_units_encoder',
         None,
         [int, str, None],
-        "Number of units to use in non-final encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** - 1 space-delimited integers, one for each layer in order from bottom to top, or ``None``, in which case the units will be equal to **k**."
+        "Number of units to use in encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** - 1 space-delimited integers, one for each layer in order from bottom to top, or ``None``, in which case the units will be equal to **k**."
     ),
     Kwarg(
         'encoder_activation',
@@ -236,29 +182,10 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['recurrent_activation']
     ),
     Kwarg(
-        'encoder_boundary_activation',
-        'hard_sigmoid',
-        [str, None],
-        "Name of activation to use for boundary activation in the HM-LSTM encoder. Ignored if encoder is not an HM-LSTM.",
-        aliases=['boundary_activation']
-    ),
-    Kwarg(
         'encoder_weight_regularization',
         None,
         [float, None],
         "Scale of L2 regularization to apply to all encoder weights and biases. If ``None``, no weight regularization."
-    ),
-    Kwarg(
-        'boundary_power',
-        None,
-        [int, None],
-        "Power to raise boundary probabilities to for information flow in the HM-LSTM encoder. Ignored if encoder is not an HM-LSTM."
-    ),
-    Kwarg(
-        'slope_annealing',
-        False,
-        bool,
-        "Whether to anneal the slopes of the boundary activations."
     ),
     Kwarg(
         'encoder_weight_normalization',
@@ -331,12 +258,6 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['resnet_n_layers_inner']
     ),
     Kwarg(
-        'batch_normalize_encodings',
-        False,
-        bool,
-        "Batch normalize latent segment encodings."
-    ),
-    Kwarg(
         'encoder_batch_normalization_decay',
         0.9,
         [float, None],
@@ -351,112 +272,16 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         aliases=['batch_normalization_decay']
     ),
     Kwarg(
-        'pad_seqs',
-        True,
-        bool,
-        "Whether to pad inputs and targets out to a fixed temporal dimensionality. Necessary in order to use minibatches larger than 1. If ``True``, sequences are padded and submitted to the network as batch arrays. If ``False``, sequences are not padded and are submitted to the network as minibatches of 1."
-    ),
-    Kwarg(
-        'n_coef',
-        13,
-        int,
-        "Number of cepstral coefficients present in the input data"
-    ),
-    Kwarg(
-        'order',
-        2,
-        int,
-        "Maximum order of derivatives present in the input data. All lower orders must also be included."
-    ),
-    Kwarg(
         'max_len',
         None,
         [int, None],
         "Maximum sequence length. If ``None``, no maximum length imposed."
     ),
     Kwarg(
-        'resample_inputs',
-        None,
-        [int, None],
-        "Resample inputs to fixed length **resample** timesteps. If ``None``, no input resampling."
-    ),
-    Kwarg(
-        'resample_outputs',
-        None,
-        [int, None],
-        "Resample targets to fixed length **resample** timesteps. If ``None``, no output resampling."
-    ),
-    Kwarg(
-        'reverse_targets',
-        True,
-        bool,
-        "Reverse the temporal dimension of the reconstruction targets."
-    ),
-    Kwarg(
-        'reconstruct_deltas',
-        False,
-        bool,
-        "Include derivatives in the reconstruction targets."
-    ),
-    Kwarg(
-        'normalize_data',
-        False,
-        bool,
-        "Normalize utterances to the range :math:`[0, 1]`. Mutually exclusive with **center_data**."
-    ),
-    Kwarg(
-        'center_data',
-        False,
-        bool,
-        "Center data about its mean. Mutually exclusive with **normalize_data**."
-    ),
-    Kwarg(
-        'constrain_output',
-        True,
-        bool,
-        "Use an output model constrained to :math:`[0, 1]` (sigmoid if MLE and LogitNormal if Bayesian). Otherwise, use linear/normal output. Requires **normalize_data* to be ``True``."
-    ),
-    Kwarg(
-        'dtw_gamma',
-        None,
-        [float, None],
-        "Smoothing parameter to use for soft-DTW objective. If ``Nonw``, do not use soft-DTW."
-    ),
-    Kwarg(
-        'n_timesteps_input',
-        None,
-        [int, None],
-        "Number of timesteps present in the input data. If ``None``, inferred from data, possibly with different values between batches."
-    ),
-    Kwarg(
-        'n_timesteps_output',
-        None,
-        [int, None],
-        "Number of timesteps present in the target data. If ``None``, inferred from data, possibly with different values between batches."
-    ),
-    Kwarg(
         'mask_padding',
         True,
         bool,
         "Mask padding frames in reconstruction targets so that they are ignored in gradient updates."
-    ),
-    Kwarg(
-        'decoder_use_input_means',
-        False,
-        bool,
-        "In addition to classifier's encoding, provide mean activations across the spectral and time dimensions to the decoder."
-    ),
-    Kwarg(
-        'decoder_use_input_length',
-        False,
-        bool,
-        "Explicitly pass number of non-padding frames in input as feature to the decoder."
-    ),
-    Kwarg(
-        'residual_decoder',
-        False,
-        bool,
-        "Compute the decoding as a sum of the network outputs and the mean activations of all cells in the training data."
     ),
     Kwarg(
         'optim_name',
@@ -488,7 +313,7 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'learning_rate',
-        0.01,
+        0.001,
         float,
         "Initial value for the learning rate."
     ),
@@ -547,12 +372,6 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Scale of regularizer on classifier entropy. If ``None``, no entropy regularization."
     ),
     Kwarg(
-        'segment_encoding_correspondence_regularizer_scale',
-        None,
-        [float, None],
-        "Scale of regularizer encouraging correspondence between segment encodings in the encoder and segment decodings in the decoder. Only used if the encoder and decoder have identical numbers of layers with identical numbers of units in each layer. If ``None``, no regularization for segment encoding correspondence."
-    ),
-    Kwarg(
         'input_dropout_rate',
         None,
         [float, None],
@@ -595,12 +414,6 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
         "Frequency (in iterations) with which to save model checkpoints."
     ),
     Kwarg(
-        'segment_eval_freq',
-        1,
-        int,
-        "Frequency (in iterations) with which to evaluate segmentations."
-    ),
-    Kwarg(
         'log_graph',
         False,
         bool,
@@ -608,80 +421,11 @@ UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS = [
     )
 ]
 
-UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS = []
-
-UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS = [
-    Kwarg(
-        'inference_name',
-        'KLqp',
-        str,
-        "Name of Edward inference to use. Currently, only variational inferences supported."
-    ),
-    Kwarg(
-        'n_samples',
-        2,
-        int,
-        "Number of samples to draw during inference."
-    ),
-    Kwarg(
-        'n_iter',
-        10000,
-        int,
-        "Expected number of training iterations. Used only for logging purposes."
-    ),
-    Kwarg(
-        'relaxed',
-        True,
-        bool,
-        "Use relaxed implementations of discrete classifier random variables (i.e. ``RelaxedOneHotCategorical`` or ``RelaxedBernoulli``). If ``False``, use discrete random variables for classification."
-    ),
-    Kwarg(
-        'temp',
-        1.,
-        float,
-        "Initial value of classifier's temperature parameter. Used only if **relaxed** is ``True``."
-    ),
-    Kwarg(
-        'trainable_temp',
-        True,
-        bool,
-        "Allow the temperature parameter to be tuned -- otherwise keep fixed at its initialization. Used only if **relaxed** is ``True``."
-    ),
-    Kwarg(
-        'mv',
-        False,
-        bool,
-        "Multivariate output model -- fit covariances between cells in the reconstruction targets."
-    ),
-    Kwarg(
-        'output_scale',
-        None,
-        [float, None],
-        "Scale to use for the output model. If ``None``, a per-category scale model is fitted for each cell in the reconstruction targets. Ignored if **mv** is ``True``."
-    ),
-    Kwarg(
-        'declare_priors',
-        True,
-        bool,
-        "Declare uniform prior over classifier random variable. If ``False``, no explicit priors are declared."
-    )
-]
-
 
 def dtsr_kwarg_docstring():
-    out = "**Both MLE and Bayes**\n\n"
+    out = ''
 
-    for kwarg in UNSUPERVISED_WORD_CLASSIFIER_INITIALIZATION_KWARGS:
-        out += '- **%s**: %s; %s\n' % (kwarg.key, kwarg.dtypes_str(), kwarg.descr)
-
-    out += '\n**MLE only**\n\n'
-
-    for kwarg in UNSUPERVISED_WORD_CLASSIFIER_MLE_INITIALIZATION_KWARGS:
-        out += '- **%s**: %s; %s\n' % (kwarg.key, kwarg.dtypes_str(), kwarg.descr)
-
-    out += '\n**Bayes only**\n\n'
-
-    for kwarg in UNSUPERVISED_WORD_CLASSIFIER_BAYES_INITIALIZATION_KWARGS:
+    for kwarg in ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS:
         out += '- **%s**: %s; %s\n' % (kwarg.key, kwarg.dtypes_str(), kwarg.descr)
 
     out += '\n'
