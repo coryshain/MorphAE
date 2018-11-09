@@ -806,6 +806,7 @@ class MultiRNNLayer(object):
                         kernel_initializer=self.kernel_initializer,
                         bias_initializer=self.bias_initializer,
                         refeed_outputs=self.refeed_outputs,
+                        name=self.name,
                         session=self.session
                     )
 
@@ -868,6 +869,7 @@ class EncoderDecoderMorphLearner(object):
         self.plot_ix = None
 
         self._initialize_session()
+        self._initialize_metadata()
 
     def _initialize_session(self):
         self.g = tf.Graph()
@@ -888,9 +890,7 @@ class EncoderDecoderMorphLearner(object):
             self.char_to_ix[i] = c
         self.vocab_size = len(self.char_to_ix)
 
-        if self.n_units_encoder is None:
-            self.units_encoder = [self.k] * self.n_layers_encoder
-        elif isinstance(self.n_units_encoder, str):
+        if isinstance(self.n_units_encoder, str):
             self.units_encoder = [int(x) for x in self.n_units_encoder.split()]
             if len(self.units_encoder) == 1:
                 self.units_encoder = [self.units_encoder[0]] * self.n_layers_encoder
@@ -900,9 +900,7 @@ class EncoderDecoderMorphLearner(object):
             self.units_encoder = self.n_units_encoder
         assert len(self.units_encoder) == self.n_layers_encoder, 'Misalignment in number of layers between n_layers_encoder and n_units_encoder.'
 
-        if self.n_units_decoder is None:
-            self.units_decoder = [self.k] * (self.n_layers_decoder - 1)
-        elif isinstance(self.n_units_decoder, str):
+        if isinstance(self.n_units_decoder, str):
             self.units_decoder = [int(x) for x in self.n_units_decoder.split()]
             if len(self.units_decoder) == 1:
                 self.units_decoder = [self.units_decoder[0]] * (self.n_layers_decoder - 1)
@@ -959,14 +957,17 @@ class EncoderDecoderMorphLearner(object):
     def build(self, n_train, outdir=None, restore=True, verbose=True):
         if outdir is None:
             if not hasattr(self, 'outdir'):
-                self.outdir = './dnnseg_model/'
+                self.outdir = './encoder_decoder_morph_model/'
         else:
             self.outdir = outdir
 
         self._initialize_inputs()
-        self.encoder = self._initialize_encoder(self.string_feats)
-        self.morph_label_probs, self.morph_label = self._initialize_classifier(self.encoder)
-        self.decoder = self._initialize_decoder(self.morph_label_probs, self.n_timesteps_output)
+        with tf.variable_scope('encoder'):
+            self.encoder = self._initialize_encoder(self.string_feats)
+        self._initialize_morph_filters()
+        self.morph_label_logits, self.morph_label_probs, self.morph_label = self._initialize_classifier(self.encoder)
+        with tf.variable_scope('decoder'):
+            self.decoder = self._initialize_decoder(self.morph_label_probs, self.n_timesteps_output)
         self._initialize_objective(n_train)
         self._initialize_saver()
         self._initialize_logging()
@@ -982,13 +983,29 @@ class EncoderDecoderMorphLearner(object):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 self.string_feats = tf.placeholder(dtype=self.FLOAT_TF, shape=[None, self.n_timestamps, self.vocab_size])
-                self.string_feats_mask = tf.placeholder(dtype=self.FLOAT_TF, shape=[None, self.n_timestamps, 1])
+                self.string_feats_mask = tf.placeholder(dtype=self.FLOAT_TF, shape=[None, self.n_timestamps])
 
                 morph_feats = {}
                 for f in self.morph_feature_map:
                     n_vals = len(self.morph_feature_map[f])
-                    morph_feats[f] = tf.placeholder_with_default(0., shape=[None, n_vals], dtype=self.FLOAT_TF, name=sn(f))
+                    zero = tf.zeros([tf.shape(self.string_feats)[0], n_vals], dtype=self.FLOAT_TF)
+                    morph_feats[f] = tf.placeholder_with_default(zero, shape=[None, n_vals], name=sn(f))
                 self.morph_feats = morph_feats
+
+                self.global_step = tf.Variable(
+                    0,
+                    trainable=False,
+                    dtype=self.INT_TF,
+                    name='global_step'
+                )
+                self.incr_global_step = tf.assign(self.global_step, self.global_step + 1)
+                self.global_batch_step = tf.Variable(
+                    0,
+                    trainable=False,
+                    dtype=self.INT_TF,
+                    name='global_batch_step'
+                )
+                self.incr_global_batch_step = tf.assign(self.global_batch_step, self.global_batch_step + 1)
 
                 self.training_batch_norm = tf.placeholder(tf.bool, name='training_batch_norm')
                 self.training_dropout = tf.placeholder(tf.bool, name='training_dropout')
@@ -1015,11 +1032,6 @@ class EncoderDecoderMorphLearner(object):
     def _initialize_encoder(self, encoder_in):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                if self.batch_normalize_encodings:
-                    encoding_batch_normalization_decay = self.encoder_batch_normalization_decay
-                else:
-                    encoding_batch_normalization_decay = None
-
                 if self.mask_padding:
                     mask = self.string_feats_mask
                 else:
@@ -1098,7 +1110,7 @@ class EncoderDecoderMorphLearner(object):
                         self.training_batch_norm,
                         units=self.units_encoder[-1],
                         activation=self.encoder_activation,
-                        batch_normalization_decay=encoding_batch_normalization_decay,
+                        batch_normalization_decay=None,
                         session=self.sess
                     )(tf.layers.Flatten()(encoder))
 
@@ -1129,7 +1141,7 @@ class EncoderDecoderMorphLearner(object):
                         self.training_batch_norm,
                         units=self.units_encoder[-1],
                         activation=self.encoder_activation,
-                        batch_normalization_decay=encoding_batch_normalization_decay,
+                        batch_normalization_decay=None,
                         session=self.sess
                     )(encoder)
 
@@ -1141,15 +1153,21 @@ class EncoderDecoderMorphLearner(object):
     def _initialize_classifier(self, classifier_in):
         with self.sess.as_default():
             with self.sess.graph.as_default():
+                morph_label_logits = {}
                 morph_label_probs = {}
                 morph_labels = {}
-                for f in self.morph_feature_map:
-                    label_probs = tf.nn.softmax(classifier_in[f])
+                i = 0
+                for f in sorted(list(self.morph_feature_map.keys())):
+                    n_val = len(self.morph_feature_map[f])
+                    logits = classifier_in[:,i:i+n_val]
+                    morph_label_logits[f] = logits
+                    label_probs = tf.nn.softmax(logits)
                     morph_label_probs[f] = label_probs
-                    label = tf.argmax(classifier_in[f])
+                    label = tf.argmax(logits)
                     morph_labels[f] = label
+                    i += n_val
 
-                return morph_label_probs, morph_labels
+                return morph_label_logits, morph_label_probs, morph_labels
 
     def _initialize_decoder(self, decoder_in, n_timesteps):
         with self.sess.as_default():
@@ -1159,17 +1177,16 @@ class EncoderDecoderMorphLearner(object):
                     decoder_in_new = decoder_in[f]
                     decoder_in_new *= self.morph_dimension_filter[f] * self.morph_value_filter[f]
                     decoder[f] = decoder_in_new
-                decoder = tf.concatenate([decoder[f] for f in decoder], axis=1)
+                decoder = tf.concat([decoder[f] for f in decoder], axis=1)
 
                 if self.mask_padding:
-                    mask = self.y_mask
+                    mask = self.string_feats_mask
                 else:
                     mask = None
 
                 if self.decoder_type.lower() in ['rnn', 'cnn_rnn']:
-                    tile_dims = [1] * len(decoder.shape) + 1
+                    tile_dims = [1] * (len(decoder.shape) + 1)
                     tile_dims[-2] = n_timesteps
-                    print(tile_dims)
 
                     decoder = tf.tile(
                         decoder[..., None, :],
@@ -1177,7 +1194,7 @@ class EncoderDecoderMorphLearner(object):
                     )
 
                     decoder = MultiRNNLayer(
-                        units=self.units_decoder + [self.frame_dim],
+                        units=self.units_decoder + [self.vocab_size],
                         layers=self.n_layers_decoder,
                         activation=self.decoder_inner_activation,
                         inner_activation=self.decoder_inner_activation,
@@ -1190,7 +1207,7 @@ class EncoderDecoderMorphLearner(object):
 
                     decoder = DenseLayer(
                         self.training_batch_norm,
-                        units=self.frame_dim,
+                        units=self.vocab_size,
                         activation=self.decoder_activation,
                         batch_normalization_decay=self.decoder_batch_normalization_decay,
                         session=self.sess
@@ -1238,13 +1255,13 @@ class EncoderDecoderMorphLearner(object):
 
                     decoder = DenseLayer(
                             self.training_batch_norm,
-                            units=n_timesteps * self.frame_dim,
+                            units=n_timesteps * self.vocab_size,
                             activation=self.decoder_inner_activation,
                             batch_normalization_decay=False,
                             session=self.sess
                     )(tf.layers.Flatten()(decoder))
 
-                    decoder_shape = tf.concat([tf.shape(decoder)[:-2], [n_timesteps, self.frame_dim]], axis=0)
+                    decoder_shape = tf.concat([tf.shape(decoder)[:-2], [n_timesteps, self.vocab_size]], axis=0)
                     decoder = tf.reshape(decoder, decoder_shape)
 
                 elif self.decoder_type.lower() == 'dense':
@@ -1284,12 +1301,12 @@ class EncoderDecoderMorphLearner(object):
 
                         self._regularize_correspondences(self.n_layers_encoder - i - 2, decoder)
 
-                    in_shape_flattened, out_shape_unflattened = self._get_decoder_shapes(decoder, n_timesteps, self.frame_dim)
+                    in_shape_flattened, out_shape_unflattened = self._get_decoder_shapes(decoder, n_timesteps, self.vocab_size)
                     decoder = tf.reshape(decoder, in_shape_flattened)
 
                     decoder = DenseLayer(
                         self.training_batch_norm,
-                        units=n_timesteps * self.frame_dim,
+                        units=n_timesteps * self.vocab_size,
                         activation=self.decoder_activation,
                         batch_normalization_decay=None,
                         session=self.sess
@@ -1307,10 +1324,10 @@ class EncoderDecoderMorphLearner(object):
             with self.sess.graph.as_default():
                 encoder_loss = 0.
                 for f in self.morph_feature_map:
-                    encoder_logits = self.encoder[f]
+                    encoder_logits = self.morph_label_logits[f]
                     encoder_targets = self.morph_feats[f]
                     filter_weights = self.morph_value_filter[f] * self.morph_dimension_filter[f]
-                    loss_new = tf.losses.softmax_cross_entropy(encoder_targets, encoder_logits, weights=filter_weights)
+                    loss_new = tf.losses.sigmoid_cross_entropy(encoder_targets, encoder_logits, weights=filter_weights)
                     encoder_loss += loss_new
 
                 decoder_logits = self.decoder

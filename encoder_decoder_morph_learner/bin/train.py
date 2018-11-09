@@ -2,6 +2,7 @@ import sys
 import os
 import shutil
 import argparse
+import string
 
 sys.setrecursionlimit(2000)
 
@@ -14,6 +15,7 @@ if __name__ == '__main__':
     Trains an encoder-decoder morphology learner model from a config file.
     ''')
     argparser.add_argument('config', help='Path to configuration file.')
+    argparser.add_argument('-r', '--restart', action='store_true', help='Restart training even if model checkpoint exists (this will overwrite existing checkpoint)')
     args = argparser.parse_args()
 
     p = Config(args.config)
@@ -31,9 +33,17 @@ if __name__ == '__main__':
     for kwarg in ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS:
         kwargs[kwarg.key] = p[kwarg.key]
 
-    morph_feature_map = {}
+    morph_feature_map = {
+        'person': [1, 2, 3],
+        'number': ['sg', 'dual', 'pl']
+    }
+
+    vocab = string.printable
 
     edml_model = EncoderDecoderMorphLearner(
         morph_feature_map,
+        vocab,
         **kwargs
     )
+
+    edml_model.build(1000)

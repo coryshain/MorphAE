@@ -157,9 +157,9 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'n_units_encoder',
-        None,
-        [int, str, None],
-        "Number of units to use in encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** - 1 space-delimited integers, one for each layer in order from bottom to top, or ``None``, in which case the units will be equal to **k**."
+        64,
+        [int, str],
+        "Number of units to use in encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** - 1 space-delimited integers, one for each layer in order from bottom to top."
     ),
     Kwarg(
         'encoder_activation',
@@ -207,9 +207,9 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'n_units_decoder',
-        None,
-        [int, str, None],
-        "Number of units to use in non-final decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom, or ``None``, in which case the units will be equal to **k**."
+        64,
+        [int, str],
+        "Number of units to use in non-final decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom."
     ),
     Kwarg(
         'n_layers_decoder',
@@ -236,6 +236,20 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
         [str, None],
         "Name of activation to use for recurrent activation in recurrent layers of the decoder. Ignored if decoder is not recurrent.",
         aliases=['recurrent_activation']
+    ),
+    Kwarg(
+        'n_timesteps_input',
+        None,
+        [int, None],
+        "Number of timesteps in the input. If ``None``, dynamic number of timesteps.",
+        aliases=['n_timesteps']
+    ),
+    Kwarg(
+        'n_timesteps_output',
+        None,
+        [int, None],
+        "Number of timesteps in the output. If ``None``, dynamic number of timesteps.",
+        aliases=['n_timesteps']
     ),
     Kwarg(
         'conv_kernel_size',
@@ -270,6 +284,12 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
         [float, None],
         "Decay rate to use for batch normalization in internal decoder layers. If ``None``, no batch normalization.",
         aliases=['batch_normalization_decay']
+    ),
+    Kwarg(
+        'pad_seqs',
+        True,
+        bool,
+        "Whether to pad inputs and targets out to a fixed temporal dimensionality. Necessary in order to use minibatches larger than 1. If ``True``, sequences are padded and submitted to the network as batch arrays. If ``False``, sequences are not padded and are submitted to the network as minibatches of 1."
     ),
     Kwarg(
         'max_len',
