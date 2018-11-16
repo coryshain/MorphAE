@@ -139,9 +139,33 @@ class Kwarg(object):
 ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     Kwarg(
         'outdir',
-        './dtsr_model/',
+        './encoder_decoder_morph_learner_model/',
         str,
         "Path to output directory, where logs and model parameters are saved."
+    ),
+    Kwarg(
+        'lex_emb_dim',
+        256,
+        int,
+        "Dimensionality of lexical embedding space."
+    ),
+    Kwarg(
+        'morph_encoder_loss_scale',
+        1.,
+        float,
+        "Scale of morphological encoder loss."
+    ),
+    Kwarg(
+        'discretize_filter',
+        True,
+        bool,
+        "Whether to implement the morphological feature filter using binary stochastic neurons. If False, filter weights are continuous on [0,1]."
+    ),
+    Kwarg(
+        'discretize_morph_encoder',
+        True,
+        bool,
+        "Whether to implement the morphological encoder using binary stochastic neurons. If False, morphological encodings are continuous on [0,1]."
     ),
     Kwarg(
         'encoder_type',
@@ -151,19 +175,19 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'n_layers_encoder',
-        2,
+        1,
         int,
         "Number of layers to use for encoder. Ignored if **encoder_type** is not ``dense``."
     ),
     Kwarg(
         'n_units_encoder',
-        64,
+        128,
         [int, str],
         "Number of units to use in encoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_encoder** - 1 space-delimited integers, one for each layer in order from bottom to top."
     ),
     Kwarg(
         'encoder_activation',
-        'tanh',
+        'elu',
         [str, None],
         "Name of activation to use at the output of the encoder",
     ),
@@ -176,7 +200,7 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'encoder_recurrent_activation',
-        'hard_sigmoid',
+        'sigmoid',
         [str, None],
         "Name of activation to use for recurrent activation in recurrent layers of the encoder. Ignored if encoder is not recurrent.",
         aliases=['recurrent_activation']
@@ -207,49 +231,41 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'n_units_decoder',
-        64,
+        128,
         [int, str],
         "Number of units to use in non-final decoder layers. Can be an ``int``, which will be used for all layers, a ``str`` with **n_layers_decoder** - 1 space-delimited integers, one for each layer in order from top to bottom."
     ),
     Kwarg(
         'n_layers_decoder',
-        2,
+        1,
         int,
         "Number of layers to use for decoder. Ignored if **decoder_type** is not ``dense``."
     ),
     Kwarg(
         'decoder_activation',
-        None,
+        'tanh',
         [str, None],
         "Name of activation to use at the output of the decoder"
     ),
     Kwarg(
         'decoder_inner_activation',
-        None,
+        'tanh',
         [str, None],
         "Name of activation to use for any internal layers of the decoder",
         aliases=['inner_activation']
     ),
     Kwarg(
         'decoder_recurrent_activation',
-        'hard_sigmoid',
+        'sigmoid',
         [str, None],
         "Name of activation to use for recurrent activation in recurrent layers of the decoder. Ignored if decoder is not recurrent.",
         aliases=['recurrent_activation']
     ),
     Kwarg(
-        'n_timesteps_input',
+        'n_timesteps',
         None,
         [int, None],
-        "Number of timesteps in the input. If ``None``, dynamic number of timesteps.",
-        aliases=['n_timesteps']
-    ),
-    Kwarg(
-        'n_timesteps_output',
-        None,
-        [int, None],
-        "Number of timesteps in the output. If ``None``, dynamic number of timesteps.",
-        aliases=['n_timesteps']
+        "Number of timesteps in the input. If ``None``, dynamic number of timesteps."
     ),
     Kwarg(
         'conv_kernel_size',
@@ -273,17 +289,23 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'encoder_batch_normalization_decay',
-        0.9,
+        None,
         [float, None],
         "Decay rate to use for batch normalization in internal encoder layers. If ``None``, no batch normalization.",
         aliases=['batch_normalization_decay']
     ),
     Kwarg(
         'decoder_batch_normalization_decay',
-        0.9,
+        None,
         [float, None],
         "Decay rate to use for batch normalization in internal decoder layers. If ``None``, no batch normalization.",
         aliases=['batch_normalization_decay']
+    ),
+    Kwarg(
+        'slope_annealing_rate',
+        None,
+        [float, None],
+        "Whether to anneal the slopes of the boundary activations."
     ),
     Kwarg(
         'pad_seqs',
@@ -304,6 +326,12 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
         "Mask padding frames in reconstruction targets so that they are ignored in gradient updates."
     ),
     Kwarg(
+        'n_iter',
+        10000,
+        int,
+        "Expected number of training iterations. Used only for logging purposes."
+    ),
+    Kwarg(
         'optim_name',
         'Nadam',
         [str, None],
@@ -321,7 +349,7 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'epsilon',
-        1e-3,
+        1e-8,
         float,
         "Epsilon to avoid boundary violations."
     ),
@@ -411,7 +439,7 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'eval_minibatch_size',
-        100000,
+        10000,
         [int, None],
         "Size of minibatches to use for prediction/evaluation (full-batch if ``None``)."
     ),
