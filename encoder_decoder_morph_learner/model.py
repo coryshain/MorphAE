@@ -6,986 +6,17 @@ import time
 import pickle
 import numpy as np
 import tensorflow as tf
-from tensorflow.python.framework import ops
-from tensorflow.python.ops import rnn_cell_impl
-from tensorflow.python.layers.utils import conv_output_length
 from Levenshtein.StringMatcher import distance as lev_dist
 
 from .kwargs import ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS
+from .data import get_data_generator, reconstruct_characters, reconstruct_morph_feats, stringify_data
+from .backend import *
 from .util import sn, get_random_permutation
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 tf_config = tf.ConfigProto()
 tf_config.gpu_options.allow_growth = True
-
-if hasattr(rnn_cell_impl, 'LayerRNNCell'):
-    LayerRNNCell = rnn_cell_impl.LayerRNNCell
-else:
-    LayerRNNCell = rnn_cell_impl._LayerRNNCell
-
-is_embedding_dimension = re.compile('d([0-9]+)')
-
-
-def get_session(session):
-    if session is None:
-        sess = tf.get_default_session()
-    else:
-        sess = session
-
-    return sess
-
-
-def get_activation(activation, session=None):
-    session = get_session(session)
-    with session.as_default():
-        with session.graph.as_default():
-            if activation:
-                if activation == 'hard_sigmoid':
-                    out = tf.keras.backend.hard_sigmoid
-                elif activation == 'bsn_round':
-                    out = lambda x: round_straight_through(tf.sigmoid(x), session=session)
-                elif activation == 'bsn_bernoulli':
-                    out = lambda x: bernoulli_straight_through(tf.sigmoid(x), session=session)
-                elif isinstance(activation, str):
-                    out = getattr(tf.nn, activation)
-                else:
-                    out = activation
-            else:
-                out = lambda x: x
-
-    return out
-
-
-def get_initializer(initializer, session=None):
-    session = get_session(session)
-    with session.as_default():
-        with session.graph.as_default():
-            if isinstance(initializer, str):
-                out = getattr(tf, initializer)
-            else:
-                out = initializer
-
-            if 'glorot' in initializer:
-                out = out()
-
-            return out
-
-
-def get_regularizer(init, scale=None, session=None):
-    session = get_session(session)
-    with session.as_default():
-        with session.graph.as_default():
-            if scale is None:
-                scale = 0.001
-
-            if init is None:
-                out = None
-            elif isinstance(init, str):
-                out = getattr(tf.contrib.layers, init)(scale=scale)
-            elif isinstance(init, float):
-                out = tf.contrib.layers.l2_regularizer(scale=init)
-
-            return out
-
-
-def round_straight_through(x, session=None):
-    session = get_session(session)
-    with session.as_default():
-        with session.graph.as_default():
-            with ops.name_scope("BinaryRound") as name:
-                with session.graph.gradient_override_map({"Round": "Identity"}):
-                    return tf.round(x, name=name)
-
-
-def bernoulli_straight_through(x, session=None):
-    session = get_session(session)
-    with session.as_default():
-        with session.graph.as_default():
-            with ops.name_scope("BernoulliSample") as name:
-                with session.graph.gradient_override_map({"Ceil": "Identity", "Sub": "BernoulliSample_ST"}):
-                    return tf.ceil(x - tf.random_uniform(tf.shape(x)), name=name)
-
-
-def initialize_embeddings(categories, dim, default=0., session=None):
-    session = get_session(session)
-    with session.as_default():
-        with session.graph.as_default():
-            categories = sorted(list(set(categories)))
-            n_categories = len(categories)
-            index_table = tf.contrib.lookup.index_table_from_tensor(
-                tf.constant(categories),
-                num_oov_buckets=1
-            )
-            embedding_matrix = tf.Variable(tf.fill([n_categories+1, dim], default))
-
-            return index_table, embedding_matrix
-
-
-@ops.RegisterGradient("BernoulliSample_ST")
-def bernoulliSample_ST(op, grad):
-    return [grad, tf.zeros(tf.shape(op.inputs[1]))]
-
-
-def get_data_generator(data, char_to_ix, morph_to_ix, lex_to_ix, max_seq_len=25, randomize=True):
-    n_data = len(data)
-    i = 0
-    if randomize:
-        ix, ix_inv = get_random_permutation(n_data)
-    else:
-        ix = np.arange(n_data)
-
-    preprocessing_function = get_data_preprocessing_function(
-        char_to_ix,
-        morph_to_ix,
-        lex_to_ix,
-        max_seq_len=max_seq_len
-    )
-
-    while True:
-        if i >= n_data:
-            i = 0
-            if randomize:
-                ix, ix_inv = get_random_permutation(n_data)
-
-        lexeme, form, form_mask, morph_feat = preprocessing_function(data[ix[i]])
-        i += 1
-
-        yield lexeme, form, form_mask, morph_feat
-
-def get_data_preprocessing_function(char_to_ix, morph_to_ix, lex_to_ix, max_seq_len=25):
-    n_char = len(char_to_ix)
-    n_morph = len(morph_to_ix)
-    n_lex = len(lex_to_ix)
-
-    def preprocessing_function(data_point):
-        lexeme = data_point[0]
-        lexeme_out = np.zeros((n_lex,))
-        if lexeme in lex_to_ix:
-            lex_ix = lex_to_ix[lexeme]
-        else:
-            lex_ix = -1
-        lexeme_out[lex_ix] = 1
-
-        form_str = data_point[1]
-        offset = max_seq_len - len(form_str)
-        form_out = np.zeros((max_seq_len, n_char))
-        form_out[:,-1] = 1
-        form_mask_out = np.zeros((max_seq_len,))
-        for k, c in enumerate(form_str):
-            form_out[k, -1] = 1
-            form_out[k, char_to_ix[c]] = 1
-        if offset > 0:
-            form_mask_out[:-offset] = 1
-        else:
-            form_mask_out[:] = 1
-
-        morph_feat_str = data_point[2]
-        morph_feat_out = np.zeros((n_morph,))
-        for m in morph_feat_str:
-            morph_feat_out[morph_to_ix[m]] = 1
-
-        return lexeme_out, form_out, form_mask_out, morph_feat_out
-
-    return preprocessing_function
-
-
-def reconstruct_characters(char_probs, char_set):
-    out = []
-    indices = np.argmax(char_probs, axis=-1)
-    for w in indices:
-        cur = ''
-        for i in w:
-            if char_set[i] is not None:
-                cur += char_set[i]
-        out.append(cur)
-
-    return out
-
-
-def reconstruct_morph_feats(morph_feat_probs, morph_set):
-    out = []
-    morph_feats_discrete = morph_feat_probs > 0.5
-    for w in morph_feats_discrete:
-        m_feats = []
-        for j, p in enumerate(w):
-            if p:
-                m_feats.append(morph_set[j])
-        out.append(';'.join(m_feats))
-
-    return out
-
-
-def stringify_data(form_gold, form_pred, morph_gold, morph_pred, char_set=None, morph_set=None):
-    if not isinstance(form_gold, list):
-        assert char_set, 'If gold forms are given as one-hot, char_set must be provided.'
-        form_gold =  reconstruct_characters(form_gold, char_set)
-
-    if not isinstance(form_pred, list):
-        assert char_set, 'If predicted forms are given as one-hot, char_set must be provided.'
-        form_pred = reconstruct_characters(form_pred, char_set)
-
-    if not isinstance(morph_gold, list):
-        assert char_set, 'If gold morphs are given as multi-hot, morph_set must be provided.'
-        morph_gold = reconstruct_morph_feats(morph_gold, morph_set)
-
-    if not isinstance(morph_pred, list):
-        assert char_set, 'If predicted morphs are given as multi-hot, morph_set must be provided.'
-        morph_pred = reconstruct_morph_feats(morph_pred, morph_set)
-
-    max_len_reconst = 0
-    max_len_morph = 0
-    for x in form_gold:
-        max_len_reconst = max(len(x), max_len_reconst)
-    for x in form_pred:
-        max_len_reconst = max(len(x), max_len_reconst)
-    for x in morph_gold:
-        max_len_morph = max(len(x), max_len_morph)
-    for x in morph_pred:
-        max_len_morph = max(len(x), max_len_morph)
-
-    out_str = ''
-    for i in range(len(form_gold)):
-        out_str += '    GOLD: %s | %s\n' %(morph_gold[i] + ' ' * (max_len_morph - len(morph_gold[i])), form_gold[i] + ' ' * (max_len_reconst - len(form_gold[i])))
-        out_str += '    PRED: %s | %s\n\n' %(morph_pred[i] + ' ' * (max_len_morph - len(morph_pred[i])), form_pred[i] + ' ' * (max_len_reconst - len(form_pred[i])))
-
-    return out_str
-
-
-class MultiLSTMCell(LayerRNNCell):
-    def __init__(
-            self,
-            num_units,
-            num_layers,
-            forget_bias=1.0,
-            activation=None,
-            inner_activation='tanh',
-            recurrent_activation='sigmoid',
-            kernel_initializer='glorot_uniform_initializer',
-            bias_initializer='zeros_initializer',
-            refeed_discretized_outputs=False,
-            reuse=None,
-            name=None,
-            dtype=None,
-            session=None
-    ):
-        self.session = get_session(session)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                super(MultiLSTMCell, self).__init__(_reuse=reuse, name=name, dtype=dtype)
-
-                if not isinstance(num_units, list):
-                    self._num_units = [num_units] * num_layers
-                else:
-                    self._num_units = num_units
-
-                assert len(self._num_units) == num_layers, 'num_units must either be an integer or a list of integers of length num_layers'
-
-                self._num_layers = num_layers
-                self._forget_bias = forget_bias
-
-                self._activation = get_activation(activation, session=self.session)
-                self._inner_activation = get_activation(inner_activation, session=self.session)
-                self._recurrent_activation = get_activation(recurrent_activation, session=self.session)
-
-                self._kernel_initializer = get_initializer(kernel_initializer, session=self.session)
-                self._bias_initializer = get_initializer(bias_initializer, session=self.session)
-
-                self._refeed_discretized_outputs = refeed_discretized_outputs
-
-    def _regularize(self, var, regularizer):
-        if regularizer is not None:
-            with self.session.as_default():
-                with self.session.graph.as_default():
-                    reg = tf.contrib.layers.apply_regularization(regularizer, [var])
-                    self.regularizer_losses.append(reg)
-
-    @property
-    def state_size(self):
-        out = []
-        for l in range(self._num_layers):
-            size = (self._num_units[l], self._num_units[l])
-            out.append(size)
-
-        out = tuple(out)
-
-        return out
-
-    @property
-    def output_size(self):
-        out = self._num_units[-1]
-
-        return out
-
-    def build(self, inputs_shape):
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                if inputs_shape[1].value is None:
-                    raise ValueError("Expected inputs.shape[-1] to be known, saw shape: %s"
-                                     % inputs_shape)
-
-                self._kernel = []
-                self._bias = []
-
-                for l in range(self._num_layers):
-                    if l == 0:
-                        bottom_up_dim = inputs_shape[1].value
-                    else:
-                        bottom_up_dim = self._num_units[l-1]
-
-                    recurrent_dim = self._num_units[l]
-                    output_dim = 4 * self._num_units[l]
-                    if self._refeed_discretized_outputs and l == 0:
-                        refeed_dim = self._num_units[-1]
-                    else:
-                        refeed_dim = 0
-
-                    kernel = self.add_variable(
-                        'kernel_%d' %l,
-                        shape=[bottom_up_dim + recurrent_dim + refeed_dim, output_dim],
-                        initializer=self._kernel_initializer
-                    )
-                    self._kernel.append(kernel)
-
-                    bias = self.add_variable(
-                        'bias_%d' %l,
-                        shape=[1, output_dim],
-                        initializer=self._bias_initializer
-                    )
-                    self._bias.append(bias)
-
-        self.built = True
-
-    def call(self, inputs, state):
-        with self.session.as_default():
-            new_state = []
-
-            h_below = inputs
-            for l, layer in enumerate(state):
-                c_behind, h_behind = layer
-
-                # Gather inputs
-                layer_inputs = [h_below, h_behind]
-
-                # if self._refeed_outputs and l == 0 and self._num_layers > 1:
-                if self._refeed_discretized_outputs:
-                    prev_state_in = tf.argmax(state[-1][1], axis=-1)
-                    prev_state_in = tf.one_hot(prev_state_in, state[-1][1].shape[-1])
-                    layer_inputs.append(prev_state_in)
-
-                layer_inputs = tf.concat(layer_inputs, axis=1)
-
-                # Compute gate pre-activations
-                s = tf.matmul(
-                    layer_inputs,
-                    self._kernel[l]
-                )
-
-                # Add bias
-                s = s + self._bias[l]
-
-                # Alias useful variables
-                if l < self._num_layers - 1:
-                    # Use inner activation if non-final layer
-                    activation = self._inner_activation
-                else:
-                    # Use outer activation if final layer
-                    activation = self._activation
-                units = self._num_units[l]
-
-                # Forget gate
-                f = self._recurrent_activation(s[:, :units] + self._forget_bias)
-                # Input gate
-                i = self._recurrent_activation(s[:, units:units * 2])
-                # Output gate
-                o = self._recurrent_activation(s[:, units * 2:units * 3])
-                # Cell proposal
-                g = activation(s[:, units * 3:units * 4])
-
-                # Compute new cell state
-                c = f * c_behind + i * g
-
-                # Compute the gated output
-                h = o * activation(c)
-
-                new_state.append((c, h))
-
-                h_below = h
-
-            new_state = tuple(new_state)
-            new_output = new_state[-1][1]
-
-            return new_output, new_state
-
-
-class DenseLayer(object):
-
-    def __init__(
-            self,
-            training,
-            units=None,
-            use_bias=True,
-            activation=None,
-            batch_normalization_decay=0.9,
-            normalize_weights=False,
-            session=None
-    ):
-        self.session = get_session(session)
-
-        self.training = training
-        self.units = units
-        self.use_bias = use_bias
-        self.activation = get_activation(activation, session=self.session)
-        self.batch_normalization_decay = batch_normalization_decay
-        self.normalize_weights = normalize_weights
-
-        self.dense_layer = None
-        self.projection = None
-
-        self.built = False
-
-    def build(self, inputs):
-        if not self.built:
-            if self.units is None:
-                out_dim = inputs.shape[-1]
-            else:
-                out_dim = self.units
-
-            with self.session.as_default():
-                with self.session.graph.as_default():
-                    self.dense_layer = tf.keras.layers.Dense(
-                        out_dim,
-                        input_shape=[inputs.shape[1]],
-                        use_bias=self.use_bias
-                    )
-
-            self.built = True
-
-    def __call__(self, inputs):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-
-                H = self.dense_layer(inputs)
-
-                if self.normalize_weights:
-                    self.w = self.dense_layer.kernel
-                    self.g = tf.Variable(tf.ones(self.w.shape[1]), dtype=tf.float32)
-                    self.v = tf.norm(self.w, axis=0)
-                    self.dense_layer.kernel = self.v
-
-                if self.batch_normalization_decay:
-                    # H = tf.layers.batch_normalization(H, training=self.training)
-                    H = tf.contrib.layers.batch_norm(
-                        H,
-                        decay=self.batch_normalization_decay,
-                        center=True,
-                        scale=True,
-                        zero_debias_moving_mean=True,
-                        is_training=self.training,
-                        updates_collections=None
-                    )
-                if self.activation is not None:
-                    H = self.activation(H)
-
-                return H
-
-
-class DenseResidualLayer(object):
-
-    def __init__(
-            self,
-            training,
-            units=None,
-            use_bias=True,
-            layers_inner=3,
-            activation_inner=None,
-            activation=None,
-            batch_normalization_decay=0.9,
-            project_inputs=False,
-            session=None
-    ):
-        self.session = get_session(session)
-
-        self.training = training
-        self.units = units
-        self.use_bias = use_bias
-        self.layers_inner = layers_inner
-        self.activation_inner = get_activation(activation_inner, session=self.session)
-        self.activation = get_activation(activation, session=self.session)
-        self.batch_normalization_decay = batch_normalization_decay
-        self.project_inputs = project_inputs
-
-        self.dense_layers = None
-        self.projection = None
-
-        self.built = False
-
-    def build(self, inputs):
-        if not self.built:
-            with self.session.as_default():
-                with self.session.graph.as_default():
-                    if self.units is None:
-                        out_dim = inputs.shape[-1]
-                    else:
-                        out_dim = self.units
-
-                    self.dense_layers = []
-
-                    for i in range(self.layers_inner):
-                        if i == 0:
-                            in_dim = inputs.shape[1]
-                        else:
-                            in_dim = out_dim
-                        l = tf.keras.layers.Dense(
-                            out_dim,
-                            input_shape=[in_dim],
-                            use_bias=self.use_bias
-                        )
-                        self.dense_layers.append(l)
-
-                    if self.project_inputs:
-                        self.projection = tf.keras.layers.Dense(
-                            out_dim,
-                            input_shape=[inputs.shape[1]]
-                        )
-
-            self.built = True
-
-    def __call__(self, inputs):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-
-                F = inputs
-                for i in range(self.layers_inner - 1):
-                    F = self.dense_layers[i](F)
-                    if self.batch_normalization_decay:
-                        # F = tf.layers.batch_normalization(F, training=self.training)
-                        F = tf.contrib.layers.batch_norm(
-                            F,
-                            decay=self.batch_normalization_decay,
-                            center=True,
-                            scale=True,
-                            zero_debias_moving_mean=True,
-                            is_training=self.training,
-                            updates_collections=None
-                        )
-                    if self.activation_inner is not None:
-                        F = self.activation_inner(F)
-
-                F = self.dense_layers[-1](F)
-                if self.batch_normalization_decay:
-                    # F = tf.layers.batch_normalization(F, training=self.training)
-                    F = tf.contrib.layers.batch_norm(
-                        F,
-                        decay=self.batch_normalization_decay,
-                        center=True,
-                        scale=True,
-                        zero_debias_moving_mean=True,
-                        is_training=self.training,
-                        updates_collections=None
-                    )
-
-                if self.project_inputs:
-                    x = self.projection(inputs)
-                else:
-                    x = inputs
-
-                H = F + x
-
-                if self.activation is not None:
-                    H = self.activation(H)
-
-                return H
-
-
-class Conv1DLayer(object):
-
-    def __init__(
-            self,
-            training,
-            kernel_size,
-            n_filters=None,
-            stride=1,
-            padding='valid',
-            use_bias=True,
-            activation=None,
-            batch_normalization_decay=0.9,
-            session=None
-    ):
-        self.session = get_session(session)
-
-        self.training = training
-        self.n_filters = n_filters
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.padding = padding
-        self.use_bias = use_bias
-        self.activation = get_activation(activation, session=self.session)
-        self.batch_normalization_decay = batch_normalization_decay
-
-        self.conv_1d_layer = None
-
-        self.built = False
-
-    def build(self, inputs):
-        if not self.built:
-            with self.session.as_default():
-                with self.session.graph.as_default():
-                    if self.n_filters is None:
-                        out_dim = inputs.shape[-1]
-                    else:
-                        out_dim = self.n_filters
-
-                    self.conv_1d_layer = tf.keras.layers.Conv1D(
-                        out_dim,
-                        self.kernel_size,
-                        padding=self.padding,
-                        strides=self.stride,
-                        use_bias=self.use_bias
-                    )
-
-            self.built = True
-
-    def __call__(self, inputs):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                H = inputs
-
-                H = self.conv_1d_layer(H)
-
-                if self.batch_normalization_decay:
-                    # H = tf.layers.batch_normalization(H, training=self.training)
-                    H = tf.contrib.layers.batch_norm(
-                        H,
-                        decay=self.batch_normalization_decay,
-                        center=True,
-                        scale=True,
-                        zero_debias_moving_mean=True,
-                        is_training=self.training,
-                        updates_collections=None
-                    )
-
-                if self.activation is not None:
-                    H = self.activation(H)
-
-                return H
-
-
-class Conv1DResidualLayer(object):
-
-    def __init__(
-            self,
-            training,
-            kernel_size,
-            n_filters=None,
-            stride=1,
-            padding='valid',
-            use_bias=True,
-            layers_inner=3,
-            activation=None,
-            activation_inner=None,
-            batch_normalization_decay=0.9,
-            project_inputs=False,
-            n_timesteps=None,
-            n_input_features=None,
-            session=None
-    ):
-        self.session = get_session(session)
-
-        self.training = training
-        self.n_filters = n_filters
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.padding = padding
-        self.use_bias = use_bias
-        self.layers_inner = layers_inner
-        self.activation = get_activation(activation, session=self.session)
-        self.activation_inner = get_activation(activation_inner, session=self.session)
-        self.batch_normalization_decay = batch_normalization_decay
-        self.project_inputs = project_inputs
-        self.n_timesteps = n_timesteps
-        self.n_input_features = n_input_features
-
-        self.conv_1d_layers = None
-        self.projection = None
-
-        self.built = False
-
-    def build(self, inputs):
-        if not self.built:
-            if self.n_filters is None:
-                out_dim = inputs.shape[-1]
-            else:
-                out_dim = self.n_filters
-
-            self.built = True
-
-            self.conv_1d_layers = []
-
-            with self.session.as_default():
-                with self.session.graph.as_default():
-
-                    conv_output_shapes = [[int(inputs.shape[1]), int(inputs.shape[2])]]
-
-                    for i in range(self.layers_inner):
-                        if isinstance(self.stride, list):
-                            cur_strides = self.stride[i]
-                        else:
-                            cur_strides = self.stride
-
-                        l = tf.keras.layers.Conv1D(
-                            out_dim,
-                            self.kernel_size,
-                            padding=self.padding,
-                            strides=cur_strides,
-                            use_bias=self.use_bias
-                        )
-
-                        if self.padding in ['causal', 'same'] and self.stride == 1:
-                            output_shape = conv_output_shapes[-1]
-                        else:
-                            output_shape = [
-                                conv_output_length(
-                                    x,
-                                    self.kernel_size,
-                                    self.padding,
-                                    self.stride
-                                ) for x in conv_output_shapes[-1]
-                            ]
-
-                        conv_output_shapes.append(output_shape)
-
-                        self.conv_1d_layers.append(l)
-
-                    self.conv_output_shapes = conv_output_shapes
-
-                    if self.project_inputs:
-                        self.projection = tf.keras.layers.Dense(
-                            self.conv_output_shapes[-1][0] * out_dim,
-                            input_shape=[self.conv_output_shapes[0][0] * self.conv_output_shapes[0][1]]
-                        )
-
-            self.built = True
-
-    def __call__(self, inputs):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                F = inputs
-
-                for i in range(self.layers_inner - 1):
-                    F = self.conv_1d_layers[i](F)
-
-                    if self.batch_normalization_decay:
-                        # F = tf.layers.batch_normalization(F, training=self.training)
-                        F = tf.contrib.layers.batch_norm(
-                            F,
-                            decay=self.batch_normalization_decay,
-                            center=True,
-                            scale=True,
-                            zero_debias_moving_mean=True,
-                            is_training=self.training,
-                            updates_collections=None
-                        )
-                    if self.activation_inner is not None:
-                        F = self.activation_inner(F)
-
-                F = self.conv_1d_layers[-1](F)
-
-                if self.batch_normalization_decay:
-                    # F = tf.layers.batch_normalization(F, training=self.training)
-                    F = tf.contrib.layers.batch_norm(
-                        F,
-                        decay=self.batch_normalization_decay,
-                        center=True,
-                        scale=True,
-                        zero_debias_moving_mean=True,
-                        is_training=self.training,
-                        updates_collections=None
-                    )
-
-                if self.project_inputs:
-                    x = tf.layers.Flatten()(inputs)
-                    x = self.projection(x)
-                    x = tf.reshape(x, tf.shape(F))
-                else:
-                    x = inputs
-
-                H = F + x
-
-                if self.activation is not None:
-                    H = self.activation(H)
-
-                return H
-
-
-class RNNLayer(object):
-
-    def __init__(
-            self,
-            units=None,
-            activation=None,
-            recurrent_activation='sigmoid',
-            kernel_initializer='glorot_uniform_initializer',
-            bias_initializer='zeros_initializer',
-            refeed_outputs = False,
-            return_sequences=True,
-            name=None,
-            session=None
-    ):
-        self.session = get_session(session)
-
-        self.units = units
-        self.activation = activation
-        self.recurrent_activation = recurrent_activation
-        self.kernel_initializer = kernel_initializer
-        self.bias_initializer = bias_initializer
-        self.refeed_outputs = refeed_outputs
-        self.return_sequences = return_sequences
-        self.name = name
-
-        self.rnn_layer = None
-
-        self.built = False
-
-    def build(self, inputs):
-        if not self.built:
-            with self.session.as_default():
-                with self.session.graph.as_default():
-                    RNN = tf.keras.layers.LSTM
-
-                    if self.units:
-                        output_dim = self.units
-                    else:
-                        output_dim = inputs.shape[-1]
-
-                    self.rnn_layer = RNN(
-                        output_dim,
-                        return_sequences=self.return_sequences,
-                        activation=self.activation,
-                        recurrent_activation=self.recurrent_activation
-                    )
-
-            self.built = True
-
-    def __call__(self, inputs, mask=None):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-
-                H = self.rnn_layer(inputs, mask=mask)
-
-                return H
-
-
-class MultiRNNLayer(object):
-
-    def __init__(
-            self,
-            units=None,
-            layers=1,
-            activation=None,
-            inner_activation='tanh',
-            recurrent_activation='sigmoid',
-            kernel_initializer='glorot_uniform_initializer',
-            bias_initializer='zeros_initializer',
-            refeed_discretized_outputs = False,
-            return_sequences=True,
-            name=None,
-            session=None
-    ):
-        self.session = get_session(session)
-
-        self.units = units
-        self.layers = layers
-        self.activation = activation
-        self.inner_activation = inner_activation
-        self.recurrent_activation = recurrent_activation
-        self.kernel_initializer = kernel_initializer
-        self.bias_initializer = bias_initializer
-        self.refeed_discretized_outputs = refeed_discretized_outputs
-        self.return_sequences = return_sequences
-        self.name = name
-
-        self.rnn_layer = None
-
-        self.built = False
-
-    def build(self, inputs):
-        if not self.built:
-            with self.session.as_default():
-                with self.session.graph.as_default():
-                    # RNN = getattr(tf.keras.layers, self.rnn_type)
-
-                    if self.units is None:
-                        units = [inputs.shape[-1]] * self.layers
-                    else:
-                        units = self.units
-
-                    # self.rnn_layer = RNN(
-                    #     out_dim,
-                    #     return_sequences=self.return_sequences,
-                    #     activation=self.activation,
-                    #     recurrent_activation=self.recurrent_activation
-                    # )
-                    # self.rnn_layer = tf.contrib.rnn.BasicLSTMCell(
-                    #     out_dim,
-                    #     activation=self.activation,
-                    #     name=self.name
-                    # )
-
-                    self.rnn_layer = MultiLSTMCell(
-                        units,
-                        self.layers,
-                        activation=self.activation,
-                        inner_activation=self.inner_activation,
-                        recurrent_activation=self.recurrent_activation,
-                        kernel_initializer=self.kernel_initializer,
-                        bias_initializer=self.bias_initializer,
-                        refeed_discretized_outputs=self.refeed_discretized_outputs,
-                        name=self.name,
-                        session=self.session
-                    )
-
-            self.built = True
-
-    def __call__(self, inputs, mask=None):
-        if not self.built:
-            self.build(inputs)
-
-        with self.session.as_default():
-            with self.session.graph.as_default():
-                # H = self.rnn_layer(inputs, mask=mask)
-                if mask is None:
-                    sequence_length = None
-                else:
-                    sequence_length = tf.reduce_sum(mask, axis=1)
-
-                H, _ = tf.nn.dynamic_rnn(
-                    self.rnn_layer,
-                    inputs,
-                    sequence_length=sequence_length,
-                    dtype=tf.float32
-                )
-
-                if not self.return_sequences:
-                    H = H[:,-1]
-
-                return H
 
 
 class EncoderDecoderMorphLearner(object):
@@ -1082,6 +113,8 @@ class EncoderDecoderMorphLearner(object):
             self.input_padding = None
             self.target_padding = None
 
+        self.predict_mode = False
+
     def _pack_metadata(self):
         md = {
             'morph_set': self.morph_set,
@@ -1125,22 +158,36 @@ class EncoderDecoderMorphLearner(object):
 
         self._initialize_inputs()
         with tf.variable_scope('encoder'):
-            self.encoder = self._initialize_encoder(self.forms)
-        self.lex_classifier, self.morph_classifier_logits, self.morph_classifier_probs, self.morph_classifier = self._initialize_classifier(self.encoder)
-        with self.sess.as_default():
-            with self.sess.graph.as_default():
-                decoder_in_lex = tf.cond(self.use_gold_lex, lambda: self.lex_embeddings, lambda: self.lex_classifier)
-                decoder_in_morph = tf.cond(self.use_gold_morph, lambda: self.morph_feats, lambda: self.morph_classifier)
+            encoder_in = self.forms
+            if self.input_dropout_rate is not None:
+                with self.sess.as_default():
+                    with self.sess.graph.as_default():
+                        encoder_in = tf.layers.dropout(
+                            encoder_in,
+                            self.input_dropout_rate,
+                            noise_shape=[tf.shape(encoder_in)[0], tf.shape(encoder_in)[1], 1],
+                            training=self.training
+                        )
+            self.encoder_lambda = self._initialize_encoder(self.char_set_size)
+            self.encoder = self.encoder_lambda(encoder_in, mask=self.forms_mask)
+        self.lex_classifier_logits, self.lex_classifier_probs, \
+            self.lex_classifier, self.morph_classifier_logits, \
+            self.morph_classifier_probs, self.morph_classifier = self._initialize_classifier(self.encoder)
+
+        decoder_in_lex, decoder_in_morph = self._initialize_decoder_inputs()
+
         with tf.variable_scope('decoder'):
             if self.decoder_type in ['rnn', 'cnn_rnn'] and False:
                 n_timesteps_output = self.n_timesteps_output
             else:
                 n_timesteps_output = self.n_timesteps
-            self.morph_classifier_filtered = decoder_in_morph * self.morph_filter
-            self.decoder_logits = self._initialize_decoder(decoder_in_lex, self.morph_classifier_filtered, n_timesteps_output)
+            self.decoder_logits = self._initialize_decoder(decoder_in_lex, decoder_in_morph, n_timesteps_output)
+
         self._initialize_objective()
-        self._initialize_saver()
         self._initialize_logging()
+        if self.ema_decay:
+            self._initialize_ema()
+        self._initialize_saver()
 
         with self.sess.as_default():
             with self.sess.graph.as_default():
@@ -1182,11 +229,15 @@ class EncoderDecoderMorphLearner(object):
                 self.incr_global_batch_step = tf.assign(self.global_batch_step, self.global_batch_step + 1)
 
                 # Boolean settings
-                self.training_batch_norm = tf.placeholder_with_default(tf.constant(True, dtype=tf.bool), shape=[], name='training_batch_norm')
-                self.training_dropout = tf.placeholder_with_default(tf.constant(True, dtype=tf.bool), shape=[], name='training_dropout')
+                self.training = tf.placeholder_with_default(tf.constant(True, dtype=tf.bool), shape=[], name='training')
                 self.use_gold_lex = tf.placeholder_with_default(tf.constant(True, dtype=tf.bool), shape=[], name='use_gold_lex')
                 self.use_gold_morph = tf.placeholder_with_default(tf.constant(True, dtype=tf.bool), shape=[], name='use_gold_morph')
-                self.sample_discrete = tf.placeholder_with_default(tf.constant(True, dtype=tf.bool), shape=[], name='sample_discrete')
+                self.use_additive_morph_noise = tf.placeholder_with_default(self.training, shape=[], name='use_additive_morph_noise')
+                morph_correction_condition = tf.logical_and(
+                    tf.cast(self.additive_morph_noise_level, dtype=tf.bool),
+                    self.use_additive_morph_noise
+                )
+                self.use_morph_correction = tf.placeholder_with_default(morph_correction_condition, shape=[], name='use_morph_correction')
 
                 # Inputs
                 self.forms = tf.placeholder(dtype=self.FLOAT_TF, shape=[None, self.n_timesteps, self.char_set_size], name='forms')
@@ -1195,21 +246,40 @@ class EncoderDecoderMorphLearner(object):
                 self.n_timesteps_output = tf.shape(self.forms)[1]
 
                 zero = tf.zeros([tf.shape(self.forms)[0], self.morph_set_size], dtype=self.FLOAT_TF)
-                self.morph_feats = tf.placeholder_with_default(zero, shape=[None, self.morph_set_size], name='morph_feats')
+                self.morph_feats_gold = tf.placeholder_with_default(zero, shape=[None, self.morph_set_size], name='morph_feats')
+                if self.additive_morph_noise_level:
+                    def noise_fn():
+                        feats = tf.cast(self.morph_feats_gold, dtype=tf.bool)
+                        morph_noise = tf.ones_like(self.morph_feats_gold) * self.additive_morph_noise_level
+                        morph_noise = tf.contrib.distributions.Bernoulli(morph_noise).sample()
+                        morph_noise = tf.cast(morph_noise, dtype=tf.bool)
+                        new_morph_feats = tf.logical_or(feats, morph_noise)
+                        new_morph_feats = tf.cast(new_morph_feats, dtype=self.FLOAT_TF)
+                        return new_morph_feats
+
+                    def clean_fn():
+                        return self.morph_feats_gold
+
+                    morph_feats = tf.cond(self.use_additive_morph_noise, noise_fn, clean_fn)
+                else:
+                    morph_feats = self.morph_feats_gold
+                self.morph_feats = morph_feats
+
+                if self.slope_annealing_rate:
+                    rate = self.slope_annealing_rate
+                    self.slope_coef = tf.minimum(10., 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
 
                 # Filter
                 morph_filter_logits = tf.Variable(tf.zeros([1, self.morph_set_size]), dtype=self.FLOAT_TF, name='morph_filter')
                 if self.discretize_filter:
                     if self.slope_annealing_rate:
-                        rate = self.slope_annealing_rate
-                        slope_coef = tf.minimum(10., 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
-                        morph_filter_logits *= slope_coef
+                        morph_filter_logits *= self.slope_coef
                 morph_filter_probs = tf.sigmoid(morph_filter_logits)
                 morph_filter = morph_filter_probs
                 if self.discretize_filter:
-                    sample_fn = lambda: bernoulli_straight_through(morph_filter, session=self.sess)
-                    round_fn = lambda: round_straight_through(morph_filter, session=self.sess)
-                    morph_filter = tf.cond(self.sample_discrete, sample_fn, round_fn)
+                    filter_sample_fn = lambda: bernoulli_straight_through(morph_filter, session=self.sess)
+                    filter_round_fn = lambda: round_straight_through(morph_filter, session=self.sess)
+                    morph_filter = tf.cond(self.training, filter_sample_fn, filter_round_fn)
                 self.morph_filter_logits = morph_filter_logits
                 self.morph_filter_probs = morph_filter_probs
                 self.morph_filter = morph_filter
@@ -1219,173 +289,194 @@ class EncoderDecoderMorphLearner(object):
                 zero = tf.zeros([tf.shape(self.forms)[0], self.lex_set_size], dtype=self.FLOAT_TF)
                 self.lex_feats = tf.placeholder_with_default(zero, shape=[None, self.lex_set_size], name='lex_feats')
 
-                self.lex_embeddings = tf.matmul(
+                lex_embedding_logits = tf.matmul(
                     self.lex_feats,
                     self.lex_embedding_matrix
                 )
+                if self.discretize_lex_encoder:
+                    lex_embedding_logits *= self.slope_coef
+                lex_embedding_probs = tf.sigmoid(lex_embedding_logits)
+                if self.discretize_lex_encoder:
+                    lex_embedding_sample_fn = lambda: bernoulli_straight_through(lex_embedding_probs, session=self.sess)
+                    lex_embedding_round_fn = lambda: round_straight_through(lex_embedding_probs, session=self.sess)
+                    lex_embeddings = tf.cond(self.training, lex_embedding_sample_fn, lex_embedding_round_fn)
+                else:
+                    lex_embeddings = lex_embedding_logits
+                self.lex_embedding_logits = lex_embedding_logits
+                self.lex_embedding_probs = lex_embedding_probs
+                self.lex_embeddings = lex_embeddings
 
                 # Logging placeholders
                 self.loss_summary = tf.placeholder(tf.float32, name='loss_summary')
                 self.accuracy_summary = tf.placeholder(tf.float32, name='accuracy_summary')
                 self.levenshtein_summary = tf.placeholder(tf.float32, name='levenshtein_summary')
 
-    def _initialize_encoder(self, encoder_in):
+    def _initialize_encoder(self, n_feats_in):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                if self.mask_padding:
-                    mask = self.forms_mask
-                else:
-                    mask = None
-
-                encoder = encoder_in
-                if self.input_dropout_rate is not None:
-                    encoder = tf.layers.dropout(
-                        encoder,
-                        self.input_dropout_rate,
-                        noise_shape=[tf.shape(encoder)[0], tf.shape(encoder)[1], 1],
-                        training=self.training_dropout
+                if self.encoder_type.lower() in ['rnn', 'cnn_rnn']:
+                    encoder_lambda = rnn_encoder(
+                        n_feats_in,
+                        self.units_encoder,
+                        training=self.training,
+                        pre_cnn=self.encoder_type.lower() == 'cnn_rnn',
+                        cnn_kernel_size=self.conv_kernel_size,
+                        inner_activation=self.encoder_inner_activation,
+                        activation=self.encoder_activation,
+                        recurrent_activation=self.encoder_recurrent_activation,
+                        batch_normalization_decay=self.encoder_batch_normalization_decay,
+                        session=self.sess
                     )
 
-                if self.encoder_type.lower() in ['rnn', 'cnn_rnn']:
-                    if self.encoder_type == 'cnn_rnn':
-                        encoder = Conv1DLayer(
-                            self.training_batch_norm,
-                            self.conv_kernel_size,
-                            n_filters=self.n_coef * (self.order + 1),
-                            padding='same',
-                            activation=tf.nn.elu,
-                            batch_normalization_decay=self.encoder_batch_normalization_decay,
-                            session=self.sess
-                        )(encoder)
-
-                    for l in range(self.n_layers_encoder):
-                        encoder = RNNLayer(
-                            units=self.units_encoder[l],
-                            activation=self.encoder_inner_activation,
-                            recurrent_activation = self.encoder_recurrent_activation,
-                            return_sequences=False,
-                            name='RNNEncoder%s' %l,
-                            session=self.sess
-                        )(encoder, mask=mask)
-
                 elif self.encoder_type.lower() == 'cnn':
-                    encoder = Conv1DLayer(
-                        self.training_batch_norm,
+                    encoder_lambda = cnn_encoder(
+                        n_feats_in,
                         self.conv_kernel_size,
-                        n_filters=self.n_coef * (self.order + 1),
-                        padding='same',
-                        activation=tf.nn.elu,
-                        batch_normalization_decay=self.encoder_batch_normalization_decay,
-                        session=self.sess
-                    )(encoder)
-
-                    for i in range(self.n_layers_encoder - 1):
-                        if i > 0 and self.encoder_resnet_n_layers_inner:
-                            encoder = Conv1DResidualLayer(
-                                self.training_batch_norm,
-                                self.conv_kernel_size,
-                                n_filters=self.units_encoder[i],
-                                padding='causal',
-                                layers_inner=self.encoder_resnet_n_layers_inner,
-                                activation=self.encoder_inner_activation,
-                                activation_inner=self.encoder_inner_activation,
-                                batch_normalization_decay=self.batch_normalization_decay,
-                                session=self.sess
-                            )(encoder)
-                        else:
-                            encoder = Conv1DLayer(
-                                self.training_batch_norm,
-                                self.conv_kernel_size,
-                                n_filters=self.units_encoder[i],
-                                padding='causal',
-                                activation=self.encoder_inner_activation,
-                                batch_normalization_decay=self.encoder_batch_normalization_decay,
-                                session=self.sess
-                            )(encoder)
-
-                    encoder = DenseLayer(
-                        self.training_batch_norm,
-                        units=self.units_encoder[-1],
+                        self.units_encoder,
+                        training=self.training,
+                        inner_activation=self.encoder_inner_activation,
                         activation=self.encoder_activation,
+                        resnet_n_layers_inner=self.encoder_resnet_n_layers_inner,
                         batch_normalization_decay=self.encoder_batch_normalization_decay,
                         session=self.sess
-                    )(tf.layers.Flatten()(encoder))
+                    )
 
                 elif self.encoder_type.lower() == 'dense':
-                    encoder = tf.layers.Flatten()(encoder)
-
-                    for i in range(self.n_layers_encoder - 1):
-                        if i > 0 and self.encoder_resnet_n_layers_inner:
-                            encoder = DenseResidualLayer(
-                                self.training_batch_norm,
-                                units=self.n_timesteps * self.units_encoder[i],
-                                layers_inner=self.encoder_resnet_n_layers_inner,
-                                activation=self.encoder_inner_activation,
-                                activation_inner=self.encoder_inner_activation,
-                                batch_normalization_decay=self.encoder_batch_normalization_decay,
-                                session=self.sess
-                            )(encoder)
-                        else:
-                            encoder = DenseLayer(
-                                self.training_batch_norm,
-                                units=self.n_timesteps * self.units_encoder[i],
-                                activation=self.encoder_inner_activation,
-                                batch_normalization_decay=self.encoder_batch_normalization_decay,
-                                session=self.sess
-                            )(encoder)
-
-                    encoder = DenseLayer(
-                        self.training_batch_norm,
-                        units=self.units_encoder[-1],
+                    encoder_lambda = dense_encoder(
+                        self.n_timesteps,
+                        self.units_encoder,
+                        training=self.training,
+                        inner_activation=self.encoder_inner_activation,
                         activation=self.encoder_activation,
+                        resnet_n_layers_inner=self.encoder_resnet_n_layers_inner,
                         batch_normalization_decay=self.encoder_batch_normalization_decay,
                         session=self.sess
-                    )(encoder)
+                    )
 
                 else:
                     raise ValueError('Encoder type "%s" is not currently supported' %self.encoder_type)
 
-                return encoder
+                return encoder_lambda
 
     def _initialize_classifier(self, classifier_in):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                lex_classifier = DenseLayer(
-                    self.training_batch_norm,
-                    units=self.lex_emb_dim,
-                    activation=self.encoder_activation,
-                    batch_normalization_decay=None,
-                    session=self.sess
-                )(classifier_in)
+                if self.encoder_resnet_n_layers_inner:
+                    lex_classifier_logits= DenseResidualLayer(
+                        training=self.training,
+                        units=self.lex_emb_dim,
+                        layers_inner=self.encoder_resnet_n_layers_inner,
+                        activation=None,
+                        activation_inner=self.encoder_inner_activation,
+                        project_inputs=True,
+                        batch_normalization_decay=None,
+                        session=self.sess
+                    )(classifier_in)
+                else:
+                    lex_classifier_logits = DenseLayer(
+                        training=self.training,
+                        units=self.lex_emb_dim,
+                        activation=None,
+                        project_inputs=True,
+                        batch_normalization_decay=None,
+                        session=self.sess
+                    )(classifier_in)
 
-                morph_classifier_logits = DenseLayer(
-                    self.training_batch_norm,
-                    units=self.morph_set_size,
-                    activation=self.encoder_activation,
-                    batch_normalization_decay=None,
-                    session=self.sess
-                )(classifier_in)
+                if self.discretize_lex_encoder:
+                    if self.slope_annealing_rate:
+                        lex_classifier_logits *= self.slope_coef
+                lex_classifier_probs = tf.sigmoid(lex_classifier_logits)
+                if self.discretize_lex_encoder:
+                    lex_classifier_sample_fn = lambda: bernoulli_straight_through(lex_classifier_probs, session=self.sess)
+                    lex_classifier_round_fn = lambda: round_straight_through(lex_classifier_probs, session=self.sess)
+                    lex_classifier = tf.cond(self.training, lex_classifier_sample_fn, lex_classifier_round_fn)
+                else:
+                    lex_classifier = lex_classifier_logits
+
+                if self.encoder_resnet_n_layers_inner:
+                    morph_classifier_logits = DenseResidualLayer(
+                        training=self.training,
+                        units=self.morph_set_size,
+                        layers_inner=self.encoder_resnet_n_layers_inner,
+                        activation=None,
+                        activation_inner=self.encoder_inner_activation,
+                        project_inputs=True,
+                        batch_normalization_decay=None,
+                        session=self.sess
+                    )(classifier_in)
+                else:
+                    morph_classifier_logits = DenseLayer(
+                        training=self.training,
+                        units=self.morph_set_size,
+                        activation=None,
+                        batch_normalization_decay=None,
+                        session=self.sess
+                    )(classifier_in)
 
                 if self.discretize_morph_encoder:
                     if self.slope_annealing_rate:
-                        rate = self.slope_annealing_rate
-                        slope_coef = tf.minimum(10., 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
-                        morph_classifier_logits *= slope_coef
-                # morph_classifier_probs = tf.keras.backend.hard_sigmoid(morph_classifier_logits)
+                        morph_classifier_logits *= self.slope_coef
                 morph_classifier_probs = tf.sigmoid(morph_classifier_logits)
                 if self.discretize_morph_encoder:
-                    sample_fn = lambda: bernoulli_straight_through(morph_classifier_probs, session=self.sess)
-                    round_fn = lambda: round_straight_through(morph_classifier_probs, session=self.sess)
-                    morph_classifier = tf.cond(self.sample_discrete, sample_fn, round_fn)
+                    morph_sample_fn = lambda: bernoulli_straight_through(morph_classifier_probs, session=self.sess)
+                    morph_round_fn = lambda: round_straight_through(morph_classifier_probs, session=self.sess)
+                    morph_classifier = tf.cond(self.training, morph_sample_fn, morph_round_fn)
                 else:
                     morph_classifier = morph_classifier_probs
 
-                return lex_classifier, morph_classifier_logits, morph_classifier_probs, morph_classifier
+                return lex_classifier_logits, lex_classifier_probs, lex_classifier, morph_classifier_logits, morph_classifier_probs, morph_classifier
 
-    def _initialize_decoder(self, lex_classifier, morph_classifier, n_timesteps):
+    def _initialize_decoder_inputs(self):
         with self.sess.as_default():
             with self.sess.graph.as_default():
-                decoder = tf.concat([lex_classifier, morph_classifier], axis=1)
+                self.morph_classifier_filtered = self.morph_classifier * self.morph_filter
+
+                decoder_in_lex = tf.cond(self.use_gold_lex, lambda: self.lex_embeddings, lambda: self.lex_classifier)
+
+                def gold_fn():
+                    def corrected_fn():
+                        # self.morph_correction_layer = DenseLayer(
+                        #     units=self.morph_set_size,
+                        #     training=self.training,
+                        #     activation=None,
+                        #     batch_normalization_decay=None,
+                        #     session=self.sess
+                        # )
+                        #
+                        # correction_in = tf.concat([self.morph_feats * self.morph_classifier], axis=-1)
+                        # morph_corrected_logits = self.morph_correction_layer(correction_in)
+                        #
+                        # if self.discretize_morph_encoder:
+                        #     if self.slope_annealing_rate:
+                        #         morph_corrected_logits *= self.slope_coef
+                        # morph_corrected_probs = tf.sigmoid(morph_corrected_logits)
+                        # if self.discretize_morph_encoder:
+                        #     morph_correction_sample_fn = lambda: bernoulli_straight_through(morph_corrected_probs, session=self.sess)
+                        #     morph_correction_round_fn = lambda: round_straight_through(morph_corrected_probs, session=self.sess)
+                        #     morph_corrected = tf.cond(self.training, morph_correction_sample_fn, morph_correction_round_fn)
+                        # else:
+                        #     morph_corrected = morph_corrected_probs
+
+                        morph_corrected = self.morph_feats * self.morph_classifier
+
+                        return morph_corrected
+
+                    def uncorrected_fn():
+                        return self.morph_feats
+
+                    return tf.cond(self.use_morph_correction, corrected_fn, uncorrected_fn) * self.morph_filter
+
+                def pred_fn():
+                    return self.morph_classifier * self.morph_filter
+
+                decoder_in_morph = tf.cond(self.use_gold_morph, gold_fn, pred_fn)
+
+                return decoder_in_lex, decoder_in_morph
+
+    def _initialize_decoder(self, decoder_in_lex, decoder_in_morph, n_timesteps):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                decoder = tf.concat([decoder_in_lex, decoder_in_morph], axis=1)
 
                 # if self.mask_padding:
                 #     mask = self.forms_mask
@@ -1396,88 +487,26 @@ class EncoderDecoderMorphLearner(object):
                 units_decoder = self.units_decoder + [self.char_set_size]
 
                 if self.decoder_type.lower() in ['rnn', 'cnn_rnn']:
-                    tile_dims = [1] * (len(decoder.shape) + 1)
-                    tile_dims[-2] = n_timesteps
-
-                    decoder = tf.tile(
-                        decoder[..., None, :],
-                        tile_dims
+                    decoder_lambda = rnn_decoder(
+                        tf.shape(decoder),
+                        units_decoder,
+                        n_timesteps,
+                        training=True,
+                        add_timestep_indices=False,
+                        inner_activation='tanh',
+                        recurrent_activation='tanh',
+                        activation='tanh',
+                        batch_normalization_decay=None,
+                        session=None
                     )
-                    time_ix = tf.range(n_timesteps)[None,:]
-                    time_feat = tf.one_hot(time_ix, n_timesteps)
-                    time_feat = tf.tile(
-                        time_feat,
-                        [tf.shape(decoder)[0], 1, 1]
-                    )
-
-                    decoder = tf.concat(
-                        [decoder, time_feat],
-                        axis=2
-                    )
-
-                    # in_shape_flattened, out_shape_unflattened = self._get_decoder_shapes(
-                    #     decoder,
-                    #     n_timesteps,
-                    #     units_decoder[0],
-                    #     expand_sequence=True
-                    # )
-                    # decoder = DenseLayer(
-                    #     self.training_batch_norm,
-                    #     units=n_timesteps * units_decoder[0],
-                    #     activation=tf.nn.elu,
-                    #     batch_normalization_decay=self.decoder_batch_normalization_decay,
-                    #     session=self.sess
-                    # )(decoder)
-                    # decoder = tf.reshape(decoder, out_shape_unflattened)
-                    # print(decoder.shape)
-
-
-                    # for l in range(self.n_layers_decoder):
-                    #     decoder = RNNLayer(
-                    #         units=units_decoder[l],
-                    #         activation=self.decoder_inner_activation,
-                    #         recurrent_activation = self.decoder_recurrent_activation,
-                    #         return_sequences=True,
-                    #         name='RNNDecoder%s' %l,
-                    #         session=self.sess
-                    #     )(decoder, mask=mask)
-
-                    decoder = MultiRNNLayer(
-                        units=units_decoder,
-                        layers=self.n_layers_decoder,
-                        activation=self.decoder_activation,
-                        inner_activation=self.decoder_inner_activation,
-                        recurrent_activation=self.decoder_recurrent_activation,
-                        refeed_discretized_outputs=True,
-                        return_sequences=True,
-                        name='RNNDecoder',
-                        session=self.sess
-                    )(decoder, mask=mask)
-
-                    # decoder = RNNLayer(
-                    #     units=self.char_set_size,
-                    #     activation=self.decoder_activation,
-                    #     recurrent_activation=self.decoder_recurrent_activation,
-                    #     return_sequences=True,
-                    #     name='RNNDecoderFinal',
-                    #     session=self.sess
-                    # )(decoder, mask=mask)
-
-                    # decoder = DenseLayer(
-                    #     self.training_batch_norm,
-                    #     units=self.char_set_size,
-                    #     activation=self.decoder_activation,
-                    #     batch_normalization_decay=self.decoder_batch_normalization_decay,
-                    #     session=self.sess
-                    # )(decoder)
 
                 elif self.decoder_type.lower() == 'cnn':
                     assert n_timesteps is not None, 'n_timesteps must be defined when decoder_type == "cnn"'
 
                     decoder = DenseLayer(
-                        self.training_batch_norm,
-                        n_timesteps * self.units_decoder[0],
-                        activation=tf.nn.elu,
+                        units=n_timesteps * self.units_decoder[0],
+                        training=self.training,
+                        activation=self.decoder_inner_activation,
                         batch_normalization_decay=self.decoder_batch_normalization_decay,
                         session=self.sess
                     )(decoder)
@@ -1488,8 +517,8 @@ class EncoderDecoderMorphLearner(object):
                     for i in range(self.n_layers_decoder - 1):
                         if i > 0 and self.decoder_resnet_n_layers_inner:
                             decoder = Conv1DResidualLayer(
-                                self.training_batch_norm,
                                 self.conv_kernel_size,
+                                training=self.training,
                                 n_filters=self.units_decoder[i],
                                 padding='same',
                                 layers_inner=self.decoder_resnet_n_layers_inner,
@@ -1500,8 +529,8 @@ class EncoderDecoderMorphLearner(object):
                             )(decoder)
                         else:
                             decoder = Conv1DLayer(
-                                self.training_batch_norm,
                                 self.conv_kernel_size,
+                                training=self.training,
                                 n_filters=self.units_decoder[i],
                                 padding='same',
                                 activation=self.decoder_inner_activation,
@@ -1510,8 +539,8 @@ class EncoderDecoderMorphLearner(object):
                             )(decoder)
 
                     decoder = DenseLayer(
-                            self.training_batch_norm,
                             units=n_timesteps * self.char_set_size,
+                            training=self.training,
                             activation=self.decoder_inner_activation,
                             batch_normalization_decay=False,
                             session=self.sess
@@ -1535,8 +564,8 @@ class EncoderDecoderMorphLearner(object):
                                 project_inputs = False
 
                             decoder = DenseResidualLayer(
-                                self.training_batch_norm,
                                 units=n_timesteps * units_decoder[i],
+                                training=self.training,
                                 layers_inner=self.decoder_resnet_n_layers_inner,
                                 activation=self.decoder_inner_activation,
                                 activation_inner=self.decoder_inner_activation,
@@ -1546,8 +575,8 @@ class EncoderDecoderMorphLearner(object):
                             )(decoder)
                         else:
                             decoder = DenseLayer(
-                                self.training_batch_norm,
                                 units=n_timesteps * self.units_decoder[i],
+                                training=self.training,
                                 activation=self.decoder_inner_activation,
                                 batch_normalization_decay=self.decoder_batch_normalization_decay,
                                 session=self.sess
@@ -1559,8 +588,8 @@ class EncoderDecoderMorphLearner(object):
                     decoder = tf.reshape(decoder, in_shape_flattened)
 
                     decoder = DenseLayer(
-                        self.training_batch_norm,
                         units=n_timesteps * units_decoder[-1],
+                        training=self.training,
                         activation=self.decoder_activation,
                         batch_normalization_decay=None,
                         session=self.sess
@@ -1584,10 +613,16 @@ class EncoderDecoderMorphLearner(object):
                 morph_encoder_loss *= self.morph_encoder_loss_scale
                 # morph_encoder_loss = 0.
 
-                lex_encoder_loss = tf.losses.mean_squared_error(
-                    self.lex_embeddings,
-                    self.lex_classifier
-                )
+                if self.discretize_lex_encoder:
+                    lex_encoder_loss = tf.losses.sigmoid_cross_entropy(
+                        self.lex_embeddings,
+                        self.lex_classifier_logits
+                    )
+                else:
+                    lex_encoder_loss = tf.losses.mean_squared_error(
+                        self.lex_embeddings,
+                        self.lex_classifier
+                    )
                 # lex_encoder_loss = tf.losses.softmax_cross_entropy(
                 #     self.lex_feats,
                 #     self.lex_classifier_logits
@@ -1597,13 +632,10 @@ class EncoderDecoderMorphLearner(object):
                 encoder_loss = morph_encoder_loss + lex_encoder_loss
 
                 decoder_targets = self.forms
-                decoder_mask = self.forms_mask
-                # decoder_targets = tf.Print(decoder_targets, [decoder_targets, tf.argmax(self.decoder_logits, axis=-1), decoder_mask], summarize=25)
 
                 decoder_loss = tf.losses.softmax_cross_entropy(
                     decoder_targets,
-                    self.decoder_logits,
-                    # weights=decoder_mask
+                    self.decoder_logits
                 )
 
                 loss = encoder_loss + decoder_loss
@@ -1682,6 +714,17 @@ class EncoderDecoderMorphLearner(object):
                 self.saver = tf.train.Saver()
 
                 self.check_numerics_ops = [tf.check_numerics(v, 'Numerics check failed') for v in tf.trainable_variables()]
+
+    def _initialize_ema(self):
+        with self.sess.as_default():
+            with self.sess.graph.as_default():
+                self.ema_vars = [var for var in tf.get_collection('trainable_variables') if 'BatchNorm' not in var.name]
+                self.ema = tf.train.ExponentialMovingAverage(decay=self.ema_decay)
+                self.ema_op = self.ema.apply(self.ema_vars)
+                self.ema_map = {}
+                for v in self.ema_vars:
+                    self.ema_map[self.ema.average_name(v)] = v
+                self.ema_saver = tf.train.Saver(self.ema_map)
 
 
 
@@ -1848,10 +891,10 @@ class EncoderDecoderMorphLearner(object):
 
         with self.sess.as_default():
             with self.sess.graph.as_default():
+                self.set_predict_mode(True)
+
                 fd_filter = {
-                    self.training_dropout: False,
-                    self.training_batch_norm: False,
-                    self.sample_discrete: False
+                    self.training: False
                 }
                 morph_filter = self.sess.run(self.morph_filter, feed_dict=fd_filter)[0]
                 morph_filter_ix = np.rint(morph_filter)
@@ -1899,12 +942,10 @@ class EncoderDecoderMorphLearner(object):
                             self.forms: forms_cur,
                             self.forms_mask: forms_mask,
                             self.lex_feats: lexemes,
-                            self.morph_feats: morph_feats_cur,
-                            self.training_dropout: False,
-                            self.training_batch_norm: False,
+                            self.morph_feats_gold: morph_feats_cur,
                             self.use_gold_lex: use_gold,
                             self.use_gold_morph: use_gold,
-                            self.sample_discrete: False
+                            self.training: False
                         }
 
                         char_probs_cur, morph_probs_cur = self.sess.run(
@@ -1978,6 +1019,8 @@ class EncoderDecoderMorphLearner(object):
                 sys.stderr.write('Active morphological features:\n')
                 sys.stderr.write('  %s\n\n' %(';'.join(morph_filter_str)))
 
+                self.set_predict_mode(False)
+
                 return acc, dist, failure_str
 
     def create_reinflection_data(self, data):
@@ -2033,6 +1076,8 @@ class EncoderDecoderMorphLearner(object):
 
         with self.sess.as_default():
             with self.sess.graph.as_default():
+                self.set_predict_mode(True)
+
                 for setting in ['encoder_in', 'gold_in']:
                     input_data_generator = get_data_generator(
                         input_data,
@@ -2079,12 +1124,10 @@ class EncoderDecoderMorphLearner(object):
                             self.forms: forms_cur,
                             self.forms_mask: forms_mask,
                             self.lex_feats: lexemes,
-                            self.morph_feats: morph_feats_cur,
-                            self.training_dropout: False,
-                            self.training_batch_norm: False,
+                            self.morph_feats_gold: morph_feats_cur,
                             self.use_gold_lex: use_gold,
                             self.use_gold_morph: True,
-                            self.sample_discrete: False
+                            self.training: False
                         }
 
                         char_probs_cur = self.sess.run(
@@ -2137,6 +1180,9 @@ class EncoderDecoderMorphLearner(object):
                     )
 
                     sys.stderr.write(out_str)
+
+                self.set_predict_mode(False)
+
 
     def fit(
             self,
@@ -2216,7 +1262,9 @@ class EncoderDecoderMorphLearner(object):
                             self.forms: forms,
                             self.forms_mask: forms_mask,
                             self.lex_feats: lexemes,
-                            self.morph_feats: morph_feats
+                            self.morph_feats_gold: morph_feats,
+                            self.training: True,
+                            self.use_gold_morph: True
                         }
 
                         _, loss_cur, reg_cur = self.sess.run([self.train_op, self.loss, self.regularizer_loss_total], feed_dict=fd_minibatch)
@@ -2226,6 +1274,9 @@ class EncoderDecoderMorphLearner(object):
                         if not np.isfinite(loss_cur):
                             loss_cur = 0
                         loss_total += loss_cur
+
+                        if self.ema_decay:
+                            self.sess.run(self.ema_op)
 
                         self.sess.run(self.incr_global_batch_step)
                         if verbose:
@@ -2344,10 +1395,22 @@ class EncoderDecoderMorphLearner(object):
                         sys.stderr.write('No EMA checkpoint available. Leaving internal variables unchanged.\n')
 
     def set_predict_mode(self, mode):
-        with self.sess.as_default():
-            with self.sess.graph.as_default():
-                if not mode or self.ema_decay:
+        """
+        Set predict mode.
+        If set to ``True``, the model enters predict mode and replaces parameters with the exponential moving average of their training iterates.
+        If set to ``False``, the model exits predict mode and replaces parameters with their most recently saved values.
+        To avoid data loss, always save the model before entering predict mode.
+
+        :param mode: ``bool``; if ``True``, enter predict mode. If ``False``, exit predict mode.
+        :return: ``None``
+        """
+
+        if mode != self.predict_mode:
+            with self.sess.as_default():
+                with self.sess.graph.as_default():
                     self.load(predict=mode)
+
+            self.predict_mode = mode
 
     def report_settings(self, indent=0):
         out = ' ' * indent + 'MODEL SETTINGS:\n'
@@ -2387,11 +1450,9 @@ class EncoderDecoderMorphLearner(object):
                 fd = {
                     self.forms: form,
                     self.forms_mask: form_mask,
-                    self.training_dropout: False,
-                    self.training_batch_norm: False,
                     self.use_gold_lex: False,
                     self.use_gold_morph: False,
-                    self.sample_discrete: False
+                    self.training: False
                 }
 
                 char_probs, morph_feat_probs, lexeme_ix = self.sess.run(
@@ -2416,12 +1477,10 @@ class EncoderDecoderMorphLearner(object):
                 fd = {
                     self.forms: form,
                     self.forms_mask: form_mask,
-                    self.morph_feats: morph_feats_reinfl,
-                    self.training_dropout: False,
-                    self.training_batch_norm: False,
+                    self.morph_feats_gold: morph_feats_reinfl,
                     self.use_gold_lex: False,
                     self.use_gold_morph: True,
-                    self.sample_discrete: False
+                    self.training: False
                 }
 
                 char_probs_reinfl = self.sess.run(

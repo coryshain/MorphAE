@@ -168,6 +168,12 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
         "Whether to implement the morphological encoder using binary stochastic neurons. If False, morphological encodings are continuous on [0,1]."
     ),
     Kwarg(
+        'discretize_lex_encoder',
+        False,
+        bool,
+        "Whether to implement the lexical encoder using binary stochastic neurons. If False, lexical encodings are unconstrained."
+    ),
+    Kwarg(
         'encoder_type',
         'rnn',
         str,
@@ -264,7 +270,7 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     Kwarg(
         'n_timesteps',
         None,
-        [int, None],
+        int,
         "Number of timesteps in the input. If ``None``, dynamic number of timesteps."
     ),
     Kwarg(
@@ -306,6 +312,12 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
         None,
         [float, None],
         "Whether to anneal the slopes of the boundary activations."
+    ),
+    Kwarg(
+        'additive_morph_noise_level',
+        None,
+        [float, None],
+        "Amount of additive noise (incorrect features being turned on) to add to the morph features. Must be in [0,1]."
     ),
     Kwarg(
         'pad_seqs',
@@ -427,7 +439,7 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'ema_decay',
-        None,
+        0.999,
         [float, None],
         "Decay factor to use for exponential moving average for parameters (used in prediction)."
     ),
