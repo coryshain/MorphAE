@@ -45,13 +45,14 @@ def get_data_preprocessing_function(char_to_ix, morph_to_ix, lex_to_ix, max_seq_
         lexeme_out[lex_ix] = 1
 
         form_str = data_point[1]
-        offset = max_seq_len - len(form_str)
+        offset = max_seq_len - min(len(form_str), max_seq_len)
         form_out = np.zeros((max_seq_len, n_char))
         form_out[:,-1] = 1
         form_mask_out = np.zeros((max_seq_len,))
         for k, c in enumerate(form_str):
-            form_out[k, -1] = 1
-            form_out[k, char_to_ix[c]] = 1
+            if k < max_seq_len:
+                form_out[k, -1] = 1
+                form_out[k, char_to_ix[c]] = 1
         if offset > 0:
             form_mask_out[:-offset] = 1
         else:
