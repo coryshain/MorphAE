@@ -36,10 +36,10 @@ if __name__ == '__main__':
     else:
         raise ValueError('Partition type "%s" not recognized.' % args.partition)
 
-    # _, _, reconstruction_failures = edml_model.evaluate_reconstructions(data)
-    edml_model.evaluate_reinflections(data, n_eval=args.n_eval)
+    _, _, reconstruction_failures = edml_model.evaluate_reconstructions(data, return_errors=True)
 
     outfile = edml_model.outdir + '/failures_' + args.partition + '.txt'
+    with open(outfile, 'w') as f:
+        f.write(reconstruction_failures)
 
-    # with open(outfile, 'w') as f:
-    #     f.write(reconstruction_failures)
+    edml_model.evaluate_reinflections(data, n_eval=args.n_eval)

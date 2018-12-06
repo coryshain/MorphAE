@@ -238,7 +238,6 @@ class EncoderDecoderMorphLearner(object):
                     self.use_additive_morph_noise
                 )
                 self.use_morph_correction = tf.placeholder_with_default(morph_correction_condition, shape=[], name='use_morph_correction')
-
                 # Inputs
                 self.forms = tf.placeholder(dtype=self.FLOAT_TF, shape=[None, self.n_timesteps, self.char_set_size], name='forms')
                 one = tf.ones([tf.shape(self.forms)[0], self.n_timesteps], dtype=self.FLOAT_TF)
@@ -250,10 +249,13 @@ class EncoderDecoderMorphLearner(object):
                 if self.additive_morph_noise_level:
                     def noise_fn():
                         feats = tf.cast(self.morph_feats_gold, dtype=tf.bool)
+                        # feats = tf.Print(feats, [feats])
                         morph_noise = tf.ones_like(self.morph_feats_gold) * self.additive_morph_noise_level
-                        morph_noise = tf.contrib.distributions.Bernoulli(morph_noise).sample()
+                        # morph_noise = tf.Print(morph_noise, [morph_noise])
+                        morph_noise = tf.contrib.distributions.Bernoulli(probs=morph_noise).sample()
                         morph_noise = tf.cast(morph_noise, dtype=tf.bool)
                         new_morph_feats = tf.logical_or(feats, morph_noise)
+                        # new_morph_feats = tf.Print(new_morph_feats, [new_morph_feats])
                         new_morph_feats = tf.cast(new_morph_feats, dtype=self.FLOAT_TF)
                         return new_morph_feats
 
@@ -867,7 +869,7 @@ class EncoderDecoderMorphLearner(object):
                 for op in self.check_numerics_ops:
                     self.sess.run(op)
 
-    def evaluate_reconstructions(self, cv_data, n_print=10):
+    def evaluate_reconstructions(self, cv_data, return_errors=False, n_print=10):
         cv_data_generator = get_data_generator(
             cv_data,
             self.char_to_ix,
@@ -971,33 +973,37 @@ class EncoderDecoderMorphLearner(object):
 
                     acc = 0
                     dist = 0
-                    failure_ix = []
+                    if return_errors:
+                        failure_ix = []
 
                     for i in range(len(reconstructions_gold)):
                         match = reconstructions_gold[i] == reconstructions_pred[i]
                         acc += match
                         dist += lev_dist(reconstructions_gold[i], reconstructions_pred[i])
-                        if not match:
+                        if not match and return_errors:
                             failure_ix.append(i)
 
-                    failure_forms_gold = forms[failure_ix]
-                    failure_forms_pred = char_probs[failure_ix]
-                    failure_morphs_gold = morph_feats[failure_ix]
-                    failure_morphs_pred = morph_preds[failure_ix]
+                    if return_errors:
+                        failure_forms_gold = forms[failure_ix]
+                        failure_forms_pred = char_probs[failure_ix]
+                        failure_morphs_gold = morph_feats[failure_ix]
+                        failure_morphs_pred = morph_preds[failure_ix]
 
-                    failure_str = stringify_data(
-                        failure_forms_gold,
-                        failure_forms_pred,
-                        failure_morphs_gold,
-                        failure_morphs_pred,
-                        char_set=self.ix_to_char,
-                        morph_set=self.ix_to_morph
-                    )
+                        failure_str = stringify_data(
+                            failure_forms_gold,
+                            failure_forms_pred,
+                            failure_morphs_gold,
+                            failure_morphs_pred,
+                            char_set=self.ix_to_char,
+                            morph_set=self.ix_to_morph
+                        )
+                    else:
+                        failure_str = ''
 
                     acc = float(acc) / n_eval
                     dist /= n_eval
 
-                    sys.stderr.write('Reconstruction ealuation using %s lex/morph features:\n' %eval_type)
+                    sys.stderr.write('Reconstruction evaluation using %s lex/morph features:\n' %eval_type)
                     sys.stderr.write('  Exact match accuracy: %s\n  Mean Levenshtein distance: %s\n  Reconstruction examples:\n' %(acc, dist))
 
                     reconst_to_print_gold = forms[perm[:n_print]]
@@ -1158,7 +1164,7 @@ class EncoderDecoderMorphLearner(object):
                     dist /= n_eval
 
 
-                    sys.stderr.write('Reinflection evaluation using %s lex/morph features:\n' %eval_type)
+                    sys.stderr.write('Reinflection evaluation using %s lex features:\n' %eval_type)
                     sys.stderr.write('  Exact match accuracy: %s\n  Mean Levenshtein distance: %s\n  Reconstruction examples:\n' %(acc, dist))
 
                     reinfl_to_print_gold = []
@@ -1264,6 +1270,7 @@ class EncoderDecoderMorphLearner(object):
                             self.lex_feats: lexemes,
                             self.morph_feats_gold: morph_feats,
                             self.training: True,
+                            self.use_gold_lex: True,
                             self.use_gold_morph: True
                         }
 
