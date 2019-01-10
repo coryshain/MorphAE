@@ -119,6 +119,18 @@ def bernoulliSample_ST(op, grad):
     return [grad, tf.zeros(tf.shape(op.inputs[1]))]
 
 
+def replace_gradient(fw_op, bw_op, session=None):
+    session = get_session(session)
+    with session.as_default():
+        with session.graph.as_default():
+            def new_op(x):
+                fw = fw_op(x)
+                bw = bw_op(x)
+                out = bw + tf.stop_gradient(fw-bw)
+                return out
+            return new_op
+
+
 def initialize_embeddings(categories, dim, default=0., session=None):
     session = get_session(session)
     with session.as_default():
@@ -250,6 +262,7 @@ class HMLSTMCell(LayerRNNCell):
             self,
             num_units,
             num_layers,
+            training=False,
             forget_bias=1.0,
             activation=None,
             inner_activation='tanh',
@@ -271,6 +284,7 @@ class HMLSTMCell(LayerRNNCell):
             power=None,
             boundary_slope_annealing_rate=None,
             state_slope_annealing_rate=None,
+            slope_annealing_max=None,
             state_discretizer=None,
             global_step=None,
             implementation=1,
@@ -295,12 +309,14 @@ class HMLSTMCell(LayerRNNCell):
 
                 self._num_layers = num_layers
 
+                self._training = training
+
                 self._forget_bias = forget_bias
 
-                self._activation = get_activation(activation, session=self.session)
-                self._inner_activation = get_activation(inner_activation, session=self.session)
-                self._recurrent_activation = get_activation(recurrent_activation, session=self.session)
-                self._boundary_activation = get_activation(boundary_activation, session=self.session)
+                self._activation = get_activation(activation, session=self.session, training=self._training)
+                self._inner_activation = get_activation(inner_activation, session=self.session, training=self._training)
+                self._recurrent_activation = get_activation(recurrent_activation, session=self.session, training=self._training)
+                self._boundary_activation = get_activation(boundary_activation, session=self.session, training=self._training)
 
                 self._bottomup_initializer = get_initializer(bottomup_initializer, session=self.session)
                 self._recurrent_initializer = get_initializer(recurrent_initializer, session=self.session)
@@ -322,17 +338,23 @@ class HMLSTMCell(LayerRNNCell):
                 self._power = power
                 self._boundary_slope_annealing_rate = boundary_slope_annealing_rate
                 self._state_slope_annealing_rate = state_slope_annealing_rate
-                if state_discretizer == 'bsn_round':
-                    self._state_discretizer = lambda x: round_straight_through(x, session=session)
-                elif state_discretizer == 'bsn_bernoulli':
-                    self._state_discretizer = lambda x: bernoulli_straight_through(x, session=session)
+                self._slope_annealing_max = slope_annealing_max
+                if state_discretizer:
+                    self._state_discretizer = get_activation(
+                        state_discretizer,
+                        session=self.session,
+                        training=self._training,
+                        from_logits=False
+                    )
                 else:
                     self._state_discretizer = None
-                # self._state_discretizer = get_activation(state_discretizer, session=self.session)
                 self.global_step = global_step
                 self._implementation = implementation
 
                 self._epsilon = 1e-8
+
+                print('Training:')
+                print(self._training)
 
     def _regularize(self, var, regularizer):
         if regularizer is not None:
@@ -498,13 +520,17 @@ class HMLSTMCell(LayerRNNCell):
 
                 if self._boundary_slope_annealing_rate and self.global_step is not None:
                     rate = self._boundary_slope_annealing_rate
-                    # self.boundary_slope_coef = tf.sqrt(1 + rate * tf.cast(self.global_step, dtype=tf.float32))
-                    self.boundary_slope_coef = tf.minimum(10., 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
+                    if self._slope_annealing_max is None:
+                        self.boundary_slope_coef = 1 + rate * tf.cast(self.global_step, dtype=tf.float32)
+                    else:
+                        self.boundary_slope_coef = tf.minimum(self._slope_annealing_max, 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
 
                 if self._state_slope_annealing_rate and self.global_step is not None:
                     rate = self._state_slope_annealing_rate
-                    # self.state_slope_coef = tf.sqrt(1 + rate * tf.cast(self.global_step, dtype=tf.float32))
-                    self.state_slope_coef = tf.minimum(10., 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
+                    if self._slope_annealing_max is None:
+                        self.state_slope_coef = 1 + rate * tf.cast(self.global_step, dtype=tf.float32)
+                    else:
+                        self.state_slope_coef = tf.minimum(self._slope_annealing_max, 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
 
         self.built = True
 
@@ -688,6 +714,7 @@ class HMLSTMSegmenter(object):
             self,
             num_units,
             num_layers,
+            training=False,
             forget_bias=1.0,
             activation=None,
             inner_activation='tanh',
@@ -709,6 +736,7 @@ class HMLSTMSegmenter(object):
             power=None,
             boundary_slope_annealing_rate=None,
             state_slope_annealing_rate=None,
+            slope_annealing_max=None,
             state_discretizer=None,
             global_step=None,
             implementation=1,
@@ -730,6 +758,7 @@ class HMLSTMSegmenter(object):
                     self.num_units) == num_layers, 'num_units must either be an integer or a list of integers of length num_layers'
 
                 self.num_layers = num_layers
+                self.training = training
                 self.forget_bias = forget_bias
 
                 self.activation = activation
@@ -755,6 +784,7 @@ class HMLSTMSegmenter(object):
                 self.power = power
                 self.boundary_slope_annealing_rate = boundary_slope_annealing_rate
                 self.state_slope_annealing_rate = state_slope_annealing_rate
+                self.slope_annealing_max = slope_annealing_max
                 self.state_discretizer = state_discretizer
                 self.global_step = global_step
                 self.implementation = implementation
@@ -777,6 +807,7 @@ class HMLSTMSegmenter(object):
                 self.cell = HMLSTMCell(
                     self.num_units,
                     self.num_layers,
+                    training=self.training,
                     forget_bias=self.forget_bias,
                     activation=self.activation,
                     inner_activation=self.inner_activation,
@@ -797,6 +828,7 @@ class HMLSTMSegmenter(object):
                     power=self.power,
                     boundary_slope_annealing_rate=self.boundary_slope_annealing_rate,
                     state_slope_annealing_rate=self.state_slope_annealing_rate,
+                    slope_annealing_max=self.slope_annealing_max,
                     state_discretizer=self.state_discretizer,
                     global_step=self.global_step,
                     implementation=self.implementation,
@@ -1503,7 +1535,7 @@ class RNNLayer(object):
             recurrent_activation='sigmoid',
             kernel_initializer='glorot_uniform_initializer',
             bias_initializer='zeros_initializer',
-            refeed_outputs = False,
+            refeed_outputs=False,
             return_sequences=True,
             name=None,
             session=None
@@ -1568,7 +1600,7 @@ class MultiRNNLayer(object):
             recurrent_activation='sigmoid',
             kernel_initializer='glorot_uniform_initializer',
             bias_initializer='zeros_initializer',
-            refeed_discretized_outputs = False,
+            refeed_discretized_outputs=False,
             return_sequences=True,
             name=None,
             session=None
@@ -1738,7 +1770,9 @@ def cnn_encoder(
                 session=session
             )
 
-            lambdas.append(make_lambda(cnn_layer, session=None))
+            def apply_cnn_layer(x, **kwargs):
+                return cnn_layer(x)
+            lambdas.append(apply_cnn_layer)
 
             for i in range(n_layers - 1):
                 if i > 0 and resnet_n_layers_inner:
@@ -1764,7 +1798,9 @@ def cnn_encoder(
                         session=session
                     )
 
-                lambdas.append(make_lambda(cnn_layer, session=None))
+                def apply_cnn_layer(x, **kwargs):
+                    return cnn_layer(x)
+                lambdas.append(apply_cnn_layer)
 
             flattener = tf.layers.Flatten()
             lambdas.append(make_lambda(flattener, session=None))
@@ -1952,7 +1988,5 @@ def rnn_decoder(
             out = compose_lambdas(lambdas, **kwargs)
 
             return out
-
-
 
 

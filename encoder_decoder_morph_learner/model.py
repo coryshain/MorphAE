@@ -238,6 +238,7 @@ class EncoderDecoderMorphLearner(object):
                     self.use_additive_morph_noise
                 )
                 self.use_morph_correction = tf.placeholder_with_default(morph_correction_condition, shape=[], name='use_morph_correction')
+
                 # Inputs
                 self.forms = tf.placeholder(dtype=self.FLOAT_TF, shape=[None, self.n_timesteps, self.char_set_size], name='forms')
                 one = tf.ones([tf.shape(self.forms)[0], self.n_timesteps], dtype=self.FLOAT_TF)
@@ -282,6 +283,7 @@ class EncoderDecoderMorphLearner(object):
                     filter_sample_fn = lambda: bernoulli_straight_through(morph_filter, session=self.sess)
                     filter_round_fn = lambda: round_straight_through(morph_filter, session=self.sess)
                     morph_filter = tf.cond(self.training, filter_sample_fn, filter_round_fn)
+                    # morph_filter = round_straight_through(morph_filter, session=self.sess)
                 self.morph_filter_logits = morph_filter_logits
                 self.morph_filter_probs = morph_filter_probs
                 self.morph_filter = morph_filter
@@ -423,6 +425,7 @@ class EncoderDecoderMorphLearner(object):
                     morph_sample_fn = lambda: bernoulli_straight_through(morph_classifier_probs, session=self.sess)
                     morph_round_fn = lambda: round_straight_through(morph_classifier_probs, session=self.sess)
                     morph_classifier = tf.cond(self.training, morph_sample_fn, morph_round_fn)
+                    # morph_classifier = round_straight_through(morph_classifier_probs, session=self.sess)
                 else:
                     morph_classifier = morph_classifier_probs
 
@@ -433,45 +436,85 @@ class EncoderDecoderMorphLearner(object):
             with self.sess.graph.as_default():
                 self.morph_classifier_filtered = self.morph_classifier * self.morph_filter
 
-                decoder_in_lex = tf.cond(self.use_gold_lex, lambda: self.lex_embeddings, lambda: self.lex_classifier)
+                if self.discretize_lex_encoder:
+                    def lex_train_fn():
+                        confidence = tf.abs(self.lex_classifier_logits)
+                        use_pred_prob = tf.tanh(confidence)
+                        use_pred = tf.contrib.distributions.Bernoulli(probs=use_pred_prob).sample()
+                        use_pred = tf.cast(use_pred, dtype=self.FLOAT_TF)
 
-                def gold_fn():
-                    def corrected_fn():
-                        # self.morph_correction_layer = DenseLayer(
-                        #     units=self.morph_set_size,
-                        #     training=self.training,
-                        #     activation=None,
-                        #     batch_normalization_decay=None,
-                        #     session=self.sess
-                        # )
-                        #
-                        # correction_in = tf.concat([self.morph_feats * self.morph_classifier], axis=-1)
-                        # morph_corrected_logits = self.morph_correction_layer(correction_in)
-                        #
-                        # if self.discretize_morph_encoder:
-                        #     if self.slope_annealing_rate:
-                        #         morph_corrected_logits *= self.slope_coef
-                        # morph_corrected_probs = tf.sigmoid(morph_corrected_logits)
-                        # if self.discretize_morph_encoder:
-                        #     morph_correction_sample_fn = lambda: bernoulli_straight_through(morph_corrected_probs, session=self.sess)
-                        #     morph_correction_round_fn = lambda: round_straight_through(morph_corrected_probs, session=self.sess)
-                        #     morph_corrected = tf.cond(self.training, morph_correction_sample_fn, morph_correction_round_fn)
-                        # else:
-                        #     morph_corrected = morph_corrected_probs
+                        return self.lex_classifier * use_pred + self.lex_embeddings * (1 - use_pred)
 
-                        morph_corrected = self.morph_feats * self.morph_classifier
+                    def lex_eval_fn():
+                        def gold_fn():
+                            return self.lex_embeddings
 
-                        return morph_corrected
+                        def pred_fn():
+                            return self.lex_classifier
 
-                    def uncorrected_fn():
+                        return tf.cond(self.use_gold_lex, gold_fn, pred_fn)
+
+                    decoder_in_lex = tf.cond(self.training, lex_train_fn, lex_eval_fn)
+
+                else:
+                    decoder_in_lex = tf.cond(self.use_gold_lex, lambda: self.lex_embeddings, lambda: self.lex_classifier)
+
+                def morph_train_fn():
+                    confidence = tf.abs(self.morph_classifier_logits)
+                    use_pred_prob = tf.tanh(confidence)
+                    use_pred = tf.contrib.distributions.Bernoulli(probs=use_pred_prob).sample()
+                    use_pred = tf.cast(use_pred, dtype=self.FLOAT_TF)
+
+                    return self.morph_classifier * use_pred + self.morph_feats * (1 - use_pred)
+
+                def morph_eval_fn():
+                    def gold_fn():
                         return self.morph_feats
 
-                    return tf.cond(self.use_morph_correction, corrected_fn, uncorrected_fn) * self.morph_filter
+                    def pred_fn():
+                        return self.morph_classifier
 
-                def pred_fn():
-                    return self.morph_classifier * self.morph_filter
+                    return tf.cond(self.use_gold_morph, gold_fn, pred_fn)
 
-                decoder_in_morph = tf.cond(self.use_gold_morph, gold_fn, pred_fn)
+                decoder_in_morph = tf.cond(self.training, morph_train_fn, morph_eval_fn) * self.morph_filter
+
+                # def gold_fn():
+                #     def corrected_fn():
+                #         # self.morph_correction_layer = DenseLayer(
+                #         #     units=self.morph_set_size,
+                #         #     training=self.training,
+                #         #     activation=None,
+                #         #     batch_normalization_decay=None,
+                #         #     session=self.sess
+                #         # )
+                #         #
+                #         # correction_in = tf.concat([self.morph_feats * self.morph_classifier], axis=-1)
+                #         # morph_corrected_logits = self.morph_correction_layer(correction_in)
+                #         #
+                #         # if self.discretize_morph_encoder:
+                #         #     if self.slope_annealing_rate:
+                #         #         morph_corrected_logits *= self.slope_coef
+                #         # morph_corrected_probs = tf.sigmoid(morph_corrected_logits)
+                #         # if self.discretize_morph_encoder:
+                #         #     morph_correction_sample_fn = lambda: bernoulli_straight_through(morph_corrected_probs, session=self.sess)
+                #         #     morph_correction_round_fn = lambda: round_straight_through(morph_corrected_probs, session=self.sess)
+                #         #     morph_corrected = tf.cond(self.training, morph_correction_sample_fn, morph_correction_round_fn)
+                #         # else:
+                #         #     morph_corrected = morph_corrected_probs
+                #
+                #         morph_corrected = self.morph_feats * self.morph_classifier
+                #
+                #         return morph_corrected
+                #
+                #     def uncorrected_fn():
+                #         return self.morph_feats
+                #
+                #     return tf.cond(self.use_morph_correction, corrected_fn, uncorrected_fn) * self.morph_filter
+                #
+                # def pred_fn():
+                #     return self.morph_classifier * self.morph_filter
+                #
+                # decoder_in_morph = tf.cond(self.use_gold_morph, gold_fn, pred_fn)
 
                 return decoder_in_lex, decoder_in_morph
 
@@ -651,6 +694,9 @@ class EncoderDecoderMorphLearner(object):
                 self.loss = loss
                 self.optim = self._initialize_optimizer(self.optim_name)
                 self.train_op = self.optim.minimize(self.loss, global_step=self.global_batch_step)
+
+                # print(self.sess.graph.get_all_collection_keys())
+                # print(self.sess.graph.get_operations())
 
     def _initialize_optimizer(self, name):
         with self.sess.as_default():
@@ -1334,6 +1380,8 @@ class EncoderDecoderMorphLearner(object):
 
                 self.evaluate_reconstructions(cv_data, n_print=n_print)
                 self.evaluate_reinflections(cv_data, n_print=n_print)
+
+        self.save()
 
         self.finalize()
 

@@ -314,6 +314,12 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
         "Whether to anneal the slopes of the boundary activations."
     ),
     Kwarg(
+        'slope_annealing_max',
+        10.,
+        [float, None],
+        "Maximum allowed value of the slope annealing coefficient. If ``None``, no maximum will be enforced."
+    ),
+    Kwarg(
         'additive_morph_noise_level',
         None,
         [float, None],
@@ -451,7 +457,7 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
     ),
     Kwarg(
         'eval_minibatch_size',
-        10000,
+        5000,
         [int, None],
         "Size of minibatches to use for prediction/evaluation (full-batch if ``None``)."
     ),
