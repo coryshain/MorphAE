@@ -353,9 +353,6 @@ class HMLSTMCell(LayerRNNCell):
 
                 self._epsilon = 1e-8
 
-                print('Training:')
-                print(self._training)
-
     def _regularize(self, var, regularizer):
         if regularizer is not None:
             with self.session.as_default():
@@ -417,8 +414,7 @@ class HMLSTMCell(LayerRNNCell):
         with self.session.as_default():
             with self.session.graph.as_default():
                 if inputs_shape[1].value is None:
-                    raise ValueError("Expected inputs.shape[-1] to be known, saw shape: %s"
-                                     % inputs_shape)
+                    raise ValueError("Expected inputs.shape[-1] to be known, saw shape: %s" % inputs_shape)
 
                 self._kernel_bottomup = []
                 self._kernel_recurrent = []
@@ -1537,6 +1533,7 @@ class RNNLayer(object):
             bias_initializer='zeros_initializer',
             refeed_outputs=False,
             return_sequences=True,
+            batch_normalization_decay=None,
             name=None,
             session=None
     ):
@@ -1549,7 +1546,9 @@ class RNNLayer(object):
         self.kernel_initializer = kernel_initializer
         self.bias_initializer = bias_initializer
         self.refeed_outputs = refeed_outputs
+        assert not (return_sequences and batch_normalization_decay), 'batch_normalization_decay can only be used when return_sequences=False'
         self.return_sequences = return_sequences
+        self.batch_normalization_decay = batch_normalization_decay
         self.name = name
 
         self.rnn_layer = None
@@ -1584,6 +1583,16 @@ class RNNLayer(object):
             with self.session.graph.as_default():
 
                 H = self.rnn_layer(inputs, mask=mask)
+                if self.batch_normalization_decay:
+                    H = tf.contrib.layers.batch_norm(
+                        H,
+                        decay=self.batch_normalization_decay,
+                        center=True,
+                        scale=True,
+                        zero_debias_moving_mean=True,
+                        is_training=self.training,
+                        updates_collections=None
+                    )
 
                 return H
 
@@ -1722,8 +1731,10 @@ def rnn_encoder(
             for l in range(n_layers):
                 if l < n_layers - 1:
                     activation = inner_activation
+                    batch_normalization_decay_cur = None
                 else:
                     activation = activation
+                    batch_normalization_decay_cur = batch_normalization_decay
 
                 rnn_layer = RNNLayer(
                     training=training,
@@ -1731,6 +1742,7 @@ def rnn_encoder(
                     activation=activation,
                     recurrent_activation=recurrent_activation,
                     return_sequences=False,
+                    batch_normalization_decay=batch_normalization_decay_cur,
                     name='RNNEncoder%s' % l,
                     session=session
                 )

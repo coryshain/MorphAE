@@ -104,7 +104,7 @@ class Kwarg(object):
                             val = x(from_settings)
                             parsed = True
                             break
-                        except:
+                        except TypeError:
                             pass
 
                 assert parsed, 'Invalid value "%s" received for %s' %(from_settings, self.key)
@@ -154,6 +154,12 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
         1.,
         float,
         "Scale of morphological encoder loss."
+    ),
+    Kwarg(
+        'decoder_input_attention_type',
+        None,
+        [str, None],
+        "Attention type to use for selecting inputs (encoded vs. potentially-noisy gold) to the decoder. One of ['hard', 'soft', or 'None']."
     ),
     Kwarg(
         'discretize_filter',
@@ -320,6 +326,12 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
         "Maximum allowed value of the slope annealing coefficient. If ``None``, no maximum will be enforced."
     ),
     Kwarg(
+        'slope_annealing_iteration_power',
+        1,
+        float,
+        "Power to which the iteration number ``t`` should be raised when computing annealed slopes for binary stochastic neurons."
+    ),
+    Kwarg(
         'additive_morph_noise_level',
         None,
         [float, None],
@@ -412,6 +424,12 @@ ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS = [
         False,
         bool,
         "Keep learning rate flat between ``lr_decay_steps`` (ignored if ``lr_decay_family==None``)."
+    ),
+    Kwarg(
+        'lr_decay_iteration_power',
+        1,
+        float,
+        "Power to which the iteration number ``t`` should be raised when computing the learning rate decay."
     ),
     Kwarg(
         'max_global_gradient_norm',

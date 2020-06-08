@@ -170,9 +170,12 @@ class EncoderDecoderMorphLearner(object):
                         )
             self.encoder_lambda = self._initialize_encoder(self.char_set_size)
             self.encoder = self.encoder_lambda(encoder_in, mask=self.forms_mask)
-        self.lex_classifier_logits, self.lex_classifier_probs, \
-            self.lex_classifier, self.morph_classifier_logits, \
-            self.morph_classifier_probs, self.morph_classifier = self._initialize_classifier(self.encoder)
+
+        self.lex_classifier_logits, self.lex_classifier_probs, self.lex_classifier, \
+            self.lex_attention_logits, self.lex_attention_probs, self.lex_attention, \
+            self.morph_classifier_logits, self.morph_classifier_probs, self.morph_classifier, \
+            self.morph_attention_logits, self.morph_attention_probs, self.morph_attention, \
+            = self._initialize_classifier(self.encoder)
 
         decoder_in_lex, decoder_in_morph = self._initialize_decoder_inputs()
 
@@ -270,7 +273,15 @@ class EncoderDecoderMorphLearner(object):
 
                 if self.slope_annealing_rate:
                     rate = self.slope_annealing_rate
-                    self.slope_coef = tf.minimum(10., 1 + rate * tf.cast(self.global_step, dtype=tf.float32))
+                    if self.lr_decay_iteration_power != 1:
+                        t = tf.cast(self.global_step, dtype=self.FLOAT_TF) ** self.slope_annealing_iteration_power
+                    else:
+                        t = self.global_step
+                    if self.slope_annealing_max is None:
+                        slope_coef = 1 + rate * tf.cast(t, dtype=tf.float32)
+                    else:
+                        slope_coef = tf.minimum(self.slope_annealing_max, 1 + rate * tf.cast(t, dtype=tf.float32))
+                    self.slope_coef = slope_coef
 
                 # Filter
                 morph_filter_logits = tf.Variable(tf.zeros([1, self.morph_set_size]), dtype=self.FLOAT_TF, name='morph_filter')
@@ -304,6 +315,7 @@ class EncoderDecoderMorphLearner(object):
                     lex_embedding_sample_fn = lambda: bernoulli_straight_through(lex_embedding_probs, session=self.sess)
                     lex_embedding_round_fn = lambda: round_straight_through(lex_embedding_probs, session=self.sess)
                     lex_embeddings = tf.cond(self.training, lex_embedding_sample_fn, lex_embedding_round_fn)
+                    # lex_embeddings = round_straight_through(lex_embedding_probs, session=self.sess)
                 else:
                     lex_embeddings = lex_embedding_logits
                 self.lex_embedding_logits = lex_embedding_logits
@@ -365,6 +377,7 @@ class EncoderDecoderMorphLearner(object):
     def _initialize_classifier(self, classifier_in):
         with self.sess.as_default():
             with self.sess.graph.as_default():
+                # Lexical encoder
                 if self.encoder_resnet_n_layers_inner:
                     lex_classifier_logits= DenseResidualLayer(
                         training=self.training,
@@ -381,7 +394,6 @@ class EncoderDecoderMorphLearner(object):
                         training=self.training,
                         units=self.lex_emb_dim,
                         activation=None,
-                        project_inputs=True,
                         batch_normalization_decay=None,
                         session=self.sess
                     )(classifier_in)
@@ -394,9 +406,44 @@ class EncoderDecoderMorphLearner(object):
                     lex_classifier_sample_fn = lambda: bernoulli_straight_through(lex_classifier_probs, session=self.sess)
                     lex_classifier_round_fn = lambda: round_straight_through(lex_classifier_probs, session=self.sess)
                     lex_classifier = tf.cond(self.training, lex_classifier_sample_fn, lex_classifier_round_fn)
+                    # lex_classifier = round_straight_through(lex_classifier_probs, session=self.sess)
                 else:
                     lex_classifier = lex_classifier_logits
 
+                # Lexical attention mechanism (mediates between gold and encoded lexical features)
+                if self.encoder_resnet_n_layers_inner:
+                    lex_attention_logits = DenseResidualLayer(
+                        training=self.training,
+                        units=1,
+                        layers_inner=self.encoder_resnet_n_layers_inner,
+                        activation=None,
+                        activation_inner=self.encoder_inner_activation,
+                        project_inputs=True,
+                        batch_normalization_decay=None,
+                        session=self.sess
+                    )(tf.concat([lex_classifier, self.lex_feats], axis=1))
+                else:
+                    lex_attention_logits = DenseLayer(
+                        training=self.training,
+                        units=self.lex_emb_dim,
+                        activation=None,
+                        batch_normalization_decay=None,
+                        session=self.sess
+                    )(tf.concat([lex_classifier, self.lex_embeddings], axis=1))
+
+                if self.decoder_input_attention_type.lower() == 'hard':
+                    if self.slope_annealing_rate:
+                        lex_attention_logits *= self.slope_coef
+                lex_attention_probs = tf.sigmoid(lex_attention_logits)
+                if self.decoder_input_attention_type.lower() == 'hard':
+                    lex_attention_sample_fn = lambda: bernoulli_straight_through(lex_attention_probs, session=self.sess)
+                    lex_attention_round_fn = lambda: round_straight_through(lex_attention_probs, session=self.sess)
+                    lex_attention = tf.cond(self.training, lex_attention_sample_fn, lex_attention_round_fn)
+                    # lex_attention = round_straight_through(lex_attention_probs, session=self.sess)
+                else:
+                    lex_attention = lex_attention_logits
+
+                # Morphological encoder
                 if self.encoder_resnet_n_layers_inner:
                     morph_classifier_logits = DenseResidualLayer(
                         training=self.training,
@@ -429,52 +476,87 @@ class EncoderDecoderMorphLearner(object):
                 else:
                     morph_classifier = morph_classifier_probs
 
-                return lex_classifier_logits, lex_classifier_probs, lex_classifier, morph_classifier_logits, morph_classifier_probs, morph_classifier
+                # Morphological attention mechanism (mediates between gold and encoded morphological features)
+                if self.encoder_resnet_n_layers_inner:
+                    morph_attention_logits = DenseResidualLayer(
+                        training=self.training,
+                        units=self.morph_set_size,
+                        layers_inner=self.encoder_resnet_n_layers_inner,
+                        activation=None,
+                        activation_inner=self.encoder_inner_activation,
+                        project_inputs=True,
+                        batch_normalization_decay=None,
+                        session=self.sess
+                    )(tf.concat([morph_classifier, self.morph_feats], axis=1))
+                else:
+                    morph_attention_logits = DenseLayer(
+                        training=self.training,
+                        units=self.morph_set_size,
+                        activation=None,
+                        batch_normalization_decay=None,
+                        session=self.sess
+                    )(tf.concat([morph_classifier, self.morph_feats], axis=1))
+
+                if self.decoder_input_attention_type.lower() == 'hard':
+                    if self.slope_annealing_rate:
+                        morph_attention_logits *= self.slope_coef
+                morph_attention_probs = tf.sigmoid(morph_attention_logits)
+                if self.decoder_input_attention_type.lower() == 'hard':
+                    # morph_attention_sample_fn = lambda: bernoulli_straight_through(morph_attention_probs, session=self.sess)
+                    # morph_attention_round_fn = lambda: round_straight_through(morph_attention_probs, session=self.sess)
+                    # morph_attention = tf.cond(self.training, morph_attention_sample_fn, morph_attention_round_fn)
+                    morph_attention = round_straight_through(morph_attention_probs, session=self.sess)
+                else:
+                    morph_attention = morph_attention_probs
+
+
+                return lex_classifier_logits, lex_classifier_probs, lex_classifier, \
+                       lex_attention_logits, lex_attention_probs, lex_attention, \
+                       morph_classifier_logits, morph_classifier_probs, morph_classifier, \
+                       morph_attention_logits, morph_attention_probs, morph_attention
 
     def _initialize_decoder_inputs(self):
         with self.sess.as_default():
             with self.sess.graph.as_default():
                 self.morph_classifier_filtered = self.morph_classifier * self.morph_filter
 
-                if self.discretize_lex_encoder:
+                # Lexical features
+                def lex_eval_fn():
+                    def gold_lex_fn():
+                        return self.lex_embeddings
+
+                    def pred_lex_fn():
+                        return self.lex_classifier
+
+                    return tf.cond(self.use_gold_lex, gold_lex_fn, pred_lex_fn)
+
+                if self.decoder_input_attention_type:
                     def lex_train_fn():
-                        confidence = tf.abs(self.lex_classifier_logits)
-                        use_pred_prob = tf.tanh(confidence)
-                        use_pred = tf.contrib.distributions.Bernoulli(probs=use_pred_prob).sample()
-                        use_pred = tf.cast(use_pred, dtype=self.FLOAT_TF)
-
+                        use_pred = self.lex_attention
                         return self.lex_classifier * use_pred + self.lex_embeddings * (1 - use_pred)
-
-                    def lex_eval_fn():
-                        def gold_fn():
-                            return self.lex_embeddings
-
-                        def pred_fn():
-                            return self.lex_classifier
-
-                        return tf.cond(self.use_gold_lex, gold_fn, pred_fn)
-
-                    decoder_in_lex = tf.cond(self.training, lex_train_fn, lex_eval_fn)
-
                 else:
-                    decoder_in_lex = tf.cond(self.use_gold_lex, lambda: self.lex_embeddings, lambda: self.lex_classifier)
+                    lex_train_fn = lex_eval_fn
 
-                def morph_train_fn():
-                    confidence = tf.abs(self.morph_classifier_logits)
-                    use_pred_prob = tf.tanh(confidence)
-                    use_pred = tf.contrib.distributions.Bernoulli(probs=use_pred_prob).sample()
-                    use_pred = tf.cast(use_pred, dtype=self.FLOAT_TF)
+                lex_train_fn = lex_eval_fn
 
-                    return self.morph_classifier * use_pred + self.morph_feats * (1 - use_pred)
+                decoder_in_lex = tf.cond(self.training, lex_train_fn, lex_eval_fn)
 
+                # Morphological features
                 def morph_eval_fn():
-                    def gold_fn():
+                    def gold_morph_fn():
                         return self.morph_feats
 
-                    def pred_fn():
+                    def pred_morph_fn():
                         return self.morph_classifier
 
-                    return tf.cond(self.use_gold_morph, gold_fn, pred_fn)
+                    return tf.cond(self.use_gold_morph, gold_morph_fn, pred_morph_fn)
+
+                if self.decoder_input_attention_type:
+                    def morph_train_fn():
+                        use_pred = self.morph_attention
+                        return self.morph_classifier * use_pred + self.morph_feats * (1 - use_pred)
+                else:
+                    morph_train_fn = morph_eval_fn
 
                 decoder_in_morph = tf.cond(self.training, morph_train_fn, morph_eval_fn) * self.morph_filter
 
@@ -695,9 +777,6 @@ class EncoderDecoderMorphLearner(object):
                 self.optim = self._initialize_optimizer(self.optim_name)
                 self.train_op = self.optim.minimize(self.loss, global_step=self.global_batch_step)
 
-                # print(self.sess.graph.get_all_collection_keys())
-                # print(self.sess.graph.get_operations())
-
     def _initialize_optimizer(self, name):
         with self.sess.as_default():
             with self.sess.graph.as_default():
@@ -709,14 +788,27 @@ class EncoderDecoderMorphLearner(object):
                     lr_decay_steps = tf.constant(self.lr_decay_steps, dtype=self.INT_TF)
                     lr_decay_rate = tf.constant(self.lr_decay_rate, dtype=self.FLOAT_TF)
                     lr_decay_staircase = self.lr_decay_staircase
-                    self.lr = getattr(tf.train, self.lr_decay_family)(
-                        lr,
-                        self.global_step,
-                        lr_decay_steps,
-                        lr_decay_rate,
-                        staircase=lr_decay_staircase,
-                        name='learning_rate'
-                    )
+                    if self.lr_decay_iteration_power != 1:
+                        t = tf.cast(self.global_step, dtype=self.FLOAT_TF) ** self.lr_decay_iteration_power
+                    else:
+                        t = self.global_step
+
+                    if 'cosine' in self.lr_decay_family:
+                        self.lr = getattr(tf.train, self.lr_decay_family)(
+                            lr,
+                            t,
+                            lr_decay_steps,
+                            name='learning_rate'
+                        )
+                    else:
+                        self.lr = getattr(tf.train, self.lr_decay_family)(
+                            lr,
+                            t,
+                            lr_decay_steps,
+                            lr_decay_rate,
+                            staircase=lr_decay_staircase,
+                            name='learning_rate'
+                        )
                     if np.isfinite(self.learning_rate_min):
                         lr_min = tf.constant(self.learning_rate_min, dtype=self.FLOAT_TF)
                         INF_TF = tf.constant(np.inf, dtype=self.FLOAT_TF)

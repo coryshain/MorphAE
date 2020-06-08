@@ -1,8 +1,10 @@
 import sys
 import os
 import shutil
-import numpy as np
-import configparser
+if sys.version_info[0] == 2:
+    import ConfigParser as configparser
+else:
+    import configparser
 
 from .kwargs import ENCODER_DECODER_MORPH_LEARNER_INITIALIZATION_KWARGS
 
