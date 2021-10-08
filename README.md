@@ -1,4 +1,4 @@
-# Encoder-Decoder Morphology Learner
+# MorphAE
 
 An encoder-decoder model of morphology acquisition.
 A comprehension module attempts to recognize morphological and lexical features from inflected forms,
